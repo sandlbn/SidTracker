@@ -1,0 +1,52 @@
+# Smoke test: every screen, note entry from pads, playback, save.
+# Screenshot paths are relative to sim/ (make -C sim check).
+screenshot ../build/sim/smoke-pattern-empty.png
+tap REC
+# C-4 E-4 G-4 on channel 1 (bottom pad row = octave 3, so row 2 = octave 4)
+pad 24 tap
+pad 28 tap
+pad 31 tap
+# channel 4 (SID2): bass
+press SHIFT
+tap RIGHT
+tap RIGHT
+tap RIGHT
+release SHIFT
+pad 36 tap
+pad 43 tap
+tap REC
+screenshot ../build/sim/smoke-pattern.png
+tap PLAY
+wait 2500
+screenshot ../build/sim/smoke-playing.png
+tap INSTRPARAMS
+tap F2
+screenshot ../build/sim/smoke-instrument-adsr.png
+tap F4
+screenshot ../build/sim/smoke-instrument-pulse.png
+tap F6
+screenshot ../build/sim/smoke-instrument-tables.png
+tap PERFORMANCE
+wait 500
+screenshot ../build/sim/smoke-perform.png
+tap SONG
+screenshot ../build/sim/smoke-song.png
+tap CONFIG
+screenshot ../build/sim/smoke-settings.png
+tap MASTER
+wait 1100
+screenshot ../build/sim/smoke-bench.png
+tap PLAY
+wait 300
+tap FILE
+tap F3
+wait 100
+screenshot ../build/sim/smoke-file.png
+# GoatTracker export: check, then write
+tap F5
+tap F2
+screenshot ../build/sim/smoke-gt-check.png
+tap F2
+wait 100
+screenshot ../build/sim/smoke-gt-export.png
+tap PATTERN
