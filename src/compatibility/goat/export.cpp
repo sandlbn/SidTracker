@@ -20,11 +20,21 @@ bool referenced(const sidt::Song& s, int pattern) {
 }
 
 int lastInstrument(const sidt::Song& s) {
+    // Edited slots, and init-patch slots a pattern plays (audible since 0.8;
+    // GoatTracker would play a slot above the count as a silent zero one).
+    bool played[kInstrumentCount] = {};
+    if (s.patterns)
+        for (int p = 0; p < sidt::kPatternCount; ++p) {
+            const sidt::Pattern& pt = s.pattern(p);
+            for (int r = 0; r < pt.rows; ++r)
+                for (const sidt::Cell& c : pt.cells[r])
+                    if (c.inst < kInstrumentCount) played[c.inst] = true;
+        }
     int last = 0;
     for (int i = 1; i < kInstrumentCount; ++i) {
         sidt::Instrument def;
         def.clear(i);
-        if (!s.inst[i].empty() || std::strcmp(s.inst[i].name, def.name) != 0) last = i;
+        if (played[i] || !s.inst[i].empty() || std::strcmp(s.inst[i].name, def.name) != 0) last = i;
     }
     return last;
 }
@@ -88,6 +98,8 @@ ExportCheck checkExport(const sidt::Song& s) {
     if (sid2) rep.note("! SID2 tracks 4-6 are not exported (%u cells)", unsigned(sid2));
     if (s.bpm != 125 && s.bpm != 150) rep.note("! %u BPM: GoatTracker plays one row tick per 50 Hz frame", unsigned(s.bpm));
     if (s.bpm == 150) rep.note("! 60 Hz ticks: play with NTSC timing in GoatTracker (-N)");
+    if (s.multiSpeed() > 1)
+        rep.note("! multispeed x%u: not stored in a .sng; play it with GoatTracker -S%u", unsigned(s.multiSpeed()), unsigned(s.multiSpeed()));
     if (s.hrAD != 0x0F || s.hrSR != 0x00)
         rep.note("! hard restart ADSR %02X%02X is a GoatTracker option (-A), not saved", unsigned(s.hrAD), unsigned(s.hrSR));
     if (highNotes) {
@@ -104,6 +116,7 @@ ExportCheck checkExport(const sidt::Song& s) {
     if (s.usesDrums()) rep.note("! PCM drum column is not exported");
     if (s.fx.any()) rep.note("! effects are not exported");
     if (s.mod.any()) rep.note("! LFOs and voice pan are not exported");
+    if (s.mix.any()) rep.note("! track volumes (Master mixer) are not exported");
     rep.note("%s Notes", c.notes ? "ok" : " !");
     rep.note("%s Instruments (%d)", c.instruments ? "ok" : " !", lastInstrument(s));
     rep.note("ok Wave, pulse, filter and speed tables");

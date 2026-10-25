@@ -89,6 +89,7 @@ void be16(uint8_t* d, uint16_t v) {
 }
 
 bool frameRate(const Song& s) {
+    if (s.multiSpeed() != 1) return false;
     return (s.sid.clock == SidClock::kPal && s.bpm == 125) || (s.sid.clock == SidClock::kNtsc && s.bpm == 150);
 }
 
@@ -141,7 +142,8 @@ uint32_t buildImage(const Song& s, uint8_t* img, uint32_t cap, Done* done, bool&
     *at(kSidPlayer_H_NCHIP) = dual ? 2 : 1;
     if (!frameRate(s)) {
         const uint32_t bpm = s.bpm >= 16 ? s.bpm : 125;
-        const uint32_t timer = (s.sid.clockHz() * 5u + bpm) / (2u * bpm);   // clock / (bpm * 2 / 5)
+        const uint32_t rate = bpm * s.multiSpeed();
+        const uint32_t timer = (s.sid.clockHz() * 5u + rate) / (2u * rate);   // clock / (bpm * 2 / 5 * multi)
         if (timer > 0xFFFF) {   // the CIA timer is 16 bits: below about 38 bpm a tick is too long
             rep.note("! tempo %u bpm too slow for a .sid (40 bpm or more)", unsigned(s.bpm));
             return 0;
@@ -192,6 +194,7 @@ ExportCheck checkExport(const Song& s, uint8_t* work, uint32_t workBytes) {
     if (s.usesDrums()) r.note("! PCM drum column is not exported");
     if (s.fx.any()) r.note("! effects are not exported");
     if (s.mod.any()) r.note("! LFOs and voice pan are not exported");
+    if (s.mix.any()) r.note("! track volumes (Master mixer) are not exported");
     if (s.automatedLanes()) r.note("! Perform automation is not exported");
     goat::Report sizeRep;
     const uint32_t file = exportSid(s, work, workBytes, sizeRep);
@@ -206,7 +209,8 @@ ExportCheck checkExport(const Song& s, uint8_t* work, uint32_t workBytes) {
     c.bytes = file;
     const uint32_t n = file - 0x7E;
     r.note("%s, %s", c.dual ? "two SIDs (second at $D420)" : "one SID", s.sid.clock == SidClock::kNtsc ? "NTSC" : "PAL");
-    if (c.cia) r.note("tempo %u bpm: CIA timer", unsigned(s.bpm));
+    if (c.cia && s.multiSpeed() > 1) r.note("tempo %u bpm, multispeed x%u: CIA timer", unsigned(s.bpm), unsigned(s.multiSpeed()));
+    else if (c.cia) r.note("tempo %u bpm: CIA timer", unsigned(s.bpm));
     r.note("%u bytes, $%04X-$%04X", unsigned(c.bytes), unsigned(kLoadAddress), unsigned(kLoadAddress + n - 1));
     r.ok = true;
     return c;

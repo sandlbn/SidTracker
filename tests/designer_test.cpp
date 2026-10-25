@@ -183,3 +183,52 @@ TEST(rows_only_pattern_commands_use_are_not_rewritten) {
     }
     CHECK_EQ(s.tables[kWaveTable].l(wp + 1), copy.song->tables[kWaveTable].l(wp + 1));
 }
+
+TEST(envelope_changes_leave_the_tables_alone) {
+    // UX plan P0.2: a GoatTracker-style instrument (an arpeggio program the
+    // designer did not make) keeps its programs when only the ADSR changes.
+    Box b;
+    Song& s = *b.song;
+    Table& w = s.tables[kWaveTable];
+    const uint8_t prog[][2] = {{0x41, 0x00}, {0x41, 0x04}, {0x41, 0x07}, {0xFF, 0x01}};
+    for (int i = 0; i < 4; ++i) w.left[i] = prog[i][0], w.right[i] = prog[i][1];
+    s.inst[3].wavePtr = 1;
+    const Song before = s;
+    Design d = designer::decode(s, 3);
+    d.attack = 3;
+    d.release = 12;
+    CHECK(designer::apply(s, 3, d, 0, designer::kEnv) == designer::Result::kOk);
+    CHECK(!std::memcmp(s.tables, before.tables, sizeof s.tables));
+    CHECK_EQ(s.inst[3].wavePtr, 1);
+    CHECK_EQ(s.inst[3].ad >> 4, 3);
+    CHECK_EQ(s.inst[3].sr & 15, 12);
+    // A pulse change on a designed instrument touches only the pulse table.
+    Design e;
+    CHECK(designer::apply(s, 4, e, 0) == designer::Result::kOk);
+    const Song mid = s;
+    e.pw = 0x300;
+    CHECK(designer::apply(s, 4, e, 0, designer::kPulseProg) == designer::Result::kOk);
+    CHECK(!std::memcmp(&s.tables[kWaveTable], &mid.tables[kWaveTable], sizeof(Table)));
+    CHECK(std::memcmp(&s.tables[kPulseTable], &mid.tables[kPulseTable], sizeof(Table)));
+}
+
+TEST(review_fixes_init_saw_and_hand_made_filters) {
+    // Fable review 2026-10-22.
+    Box b;
+    Song& s = *b.song;
+    // The init patch (no wave program, first wave saw) decodes as SAW.
+    s.inst[2].clear(2);
+    CHECK_EQ(designer::decode(s, 2).wave, 0x20);
+    // A hand-made filter program (not the designer's shape) reads as OFF;
+    // a jog on a filter row must not clear its pointer.
+    Table& f = s.tables[kFilterTable];
+    f.left[0] = 0x90; f.right[0] = 0xF1;
+    f.left[1] = 0x00; f.right[1] = 0x40;
+    f.left[2] = 0xFF; f.right[2] = 0x00;
+    s.inst[3].filterPtr = 1;
+    Design d = designer::decode(s, 3);
+    CHECK_EQ(d.filter, designer::kFilterOff);
+    d.cutoff = 0x60;
+    CHECK(designer::apply(s, 3, d, 0, designer::kFilterProg) == designer::Result::kOk);
+    CHECK_EQ(s.inst[3].filterPtr, 1);
+}

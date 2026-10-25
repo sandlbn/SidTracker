@@ -22,8 +22,8 @@ public:
     void encoder(int delta) override;
 
 private:
-    enum Row { kSid1, kSid2, kClock, kBalance, kVolume, kTheme, kMode, kHrAD, kHrSR, kName, kAuthor, kFirmware,
-               kRowCount };
+    enum Row { kSid1, kSid2, kClock, kBalance, kSidCopy, kVolume, kTheme, kMidiCh, kClockOut, kSyncIn, kAsidOut, kMode, kHrAD,
+               kHrSR, kName, kAuthor, kFirmware, kRowCount };
     void scanImages();
 
     int sel_ = 0;
@@ -31,7 +31,6 @@ private:
     static constexpr int kMaxImages = 8;
     char images_[kMaxImages][64] = {};
     int imageCount_ = 0, image_ = 0;
-    bool confirm_ = false;
 };
 
 // Jog-wheel character edit of a fixed-size name at `pos` (keeps it

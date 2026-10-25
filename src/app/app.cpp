@@ -4,6 +4,7 @@
 #include "ui/palette.h"
 
 #include <cstdio>
+#include <cctype>
 #include <cstring>
 
 #include "tracker/song/project_file.h"
@@ -63,6 +64,7 @@ bool App::init(const Platform& p) {
     std::strcpy(fileName_, "UNTITLED");
     engine.init(&song, p_.sampleRateMilliHz);
     engine.setCycleCounter(p_.cycleCounter);
+    engine.setMidiOut(p_.midi);
     engine.setFxMemory(p_.fxMemory, p_.fxFrames);
     engine.setKitMemory(p_.kitMemory, p_.kitSamples);
     if (p_.audio) {
@@ -70,6 +72,7 @@ bool App::init(const Platform& p) {
         p_.audio->start();
     }
     if (p_.setRawDetents) p_.setRawDetents(true);   // jog wheel = value editor
+    undo_.init(p_.undoMemory, p_.undoBytes, &song);
     ui.init(*this);
     lastAutosave_ = p_.clock->millis();
     return true;
@@ -93,6 +96,265 @@ void App::loop() {
     ui.update(now);
     if (autoDirty_ && p_.storage && now - lastAutosave_ >= kAutosaveMs && !engine.player().playing()) autosave();
     if (settingsDirty_ && now - settingsChanged_ >= 1000) saveSettings();
+    if (sidPlaying_) sidService();
+    midiPoll();
+    if (undoTouched_) {
+        undoTouched_ = false;
+        undo_.touched(now);
+    }
+    undo_.service(p_.clock->millis());
+    // At once when the cursor reaches tracks 4-6 (their auditions must sound).
+    if (now - lastCopyCheck_ >= 250 || (engine.sidCopy() && ui.channel >= 3 && !sidPlaying_)) {
+        lastCopyCheck_ = now;
+        updateSidCopy();
+    }
+}
+
+void App::setSidCopy(bool on) {
+    settings_.sidCopy = on ? 1 : 0;
+    settingsDirty_ = true;
+    settingsChanged_ = p_.clock->millis();
+    updateSidCopy();
+}
+
+void App::updateSidCopy() {
+    // SID 2 copies SID 1 when the setting is on and SID 2 has nothing of its
+    // own: a one-SID .sid tune, or a song whose tracks 4-6 are empty.
+    bool on = settings_.sidCopy != 0;
+    if (on && sidPlaying_) {
+        on = sidInfo_.sid2 == 0;
+    } else if (on && ui.channel >= 3) {
+        on = false;   // working on tracks 4-6: SID 2 is theirs
+    } else if (on) {
+        for (int i = 0; i < song.orderLen && on; ++i) {
+            const Pattern& p = song.pattern(song.order[i].pattern);
+            for (int r = 0; r < p.rows && on; ++r)
+                for (int ch = 3; ch < kChannels; ++ch)
+                    if (!p.cells[r][ch].empty()) on = false;
+        }
+    }
+    engine.setSidCopy(on);
+}
+
+bool App::undo() { return undoSwap(false); }
+bool App::redo() { return undoSwap(true); }
+
+bool App::undoSwap(bool redo) {
+    if (!undo_.ready()) return false;
+    const uint32_t now = p_.clock->millis();
+    if (undoTouched_) {
+        undoTouched_ = false;
+        undo_.touched(now);
+    }
+    undo_.service(now, true);   // an edit still pending is a step of its own
+    const SidConfig sid = song.sid;
+    engine.hold();
+    const bool ok = redo ? undo_.redo() : undo_.undo();
+    engine.release();
+    if (!ok) return false;
+    if (std::memcmp(&sid, &song.sid, sizeof sid)) engine.applySongConfig();
+    dirty_ = autoDirty_ = true;
+    ui.songEdited();
+    return true;
+}
+
+void App::setMidi(uint8_t channel, uint8_t clockOut, uint8_t syncIn, uint8_t asidOut) {
+    settings_.midiChannel = uint8_t(channel > 16 ? 0 : channel);
+    settings_.clockOut = uint8_t(clockOut & 3);
+    settings_.syncIn = uint8_t(syncIn > 2 ? 0 : syncIn);
+    settings_.asidOut = uint8_t(asidOut & 3);
+    engine.setClockPorts(settings_.clockOut);
+    engine.setAsidPorts(settings_.asidOut);
+    if (!settings_.syncIn) {
+        sync_ = Sync{};
+        engine.setExternalTickRate(0);
+    }
+    settingsDirty_ = true;
+    settingsChanged_ = p_.clock->millis();
+}
+
+void App::midiPoll() {
+    if (!p_.midi) return;
+    uint8_t buf[64];
+    const ot::MidiPortId ports[2] = {ot::MidiPortId::kDin, ot::MidiPortId::kUsb};
+    for (int k = 0; k < 2; ++k) {
+        for (int guard = 0; guard < 8; ++guard) {
+            const uint32_t n = p_.midi->receive(ports[k], buf, sizeof buf);
+            if (!n) break;
+            midi::Parser::Msg m;
+            for (uint32_t i = 0; i < n; ++i)
+                if (midiIn_[k].feed(buf[i], m)) midiMessage(uint8_t(k + 1), m);
+        }
+    }
+    midiSyncUpdate();
+}
+
+void App::midiMessage(uint8_t port, const midi::Parser::Msg& m) {
+    if (m.status >= 0xF8) {   // real time: only from the sync port
+        if (settings_.syncIn != port) return;
+        switch (m.status) {
+            case 0xF8: {
+                const uint32_t now = p_.clock->micros();
+                if (sync_.lastUs) {
+                    const uint32_t d = now - sync_.lastUs;
+                    if (d > 2000 && d < 250000)   // 10..1250 bpm
+                        sync_.periodUs = sync_.periodUs ? (sync_.periodUs * 7 + d) / 8 : d;
+                }
+                sync_.lastUs = now;
+                sync_.lastSeenMs = p_.clock->millis();
+                if (sync_.running) {
+                    // Each clock asks for speed / 6 ticks at the speed in force now
+                    // (a tempo command or funk tempo changes it mid-song).
+                    const uint8_t sp = engine.player().speed() ? engine.player().speed() : 6;
+                    sync_.target += double(sp) / 6.0;
+                    ++sync_.clocks;
+                }
+                break;
+            }
+            case 0xFA:   // start: the song from the top
+            case 0xFB:   // continue: the song from the Song screen's position
+                if (sidPlaying_) sidStop();
+                if (m.status == 0xFA) engine.playSong(0);
+                else engine.playSong(sync_.stopPos, sync_.stopRow);   // continue where Stop halted
+                sync_.running = true;
+                sync_.clocks = 0;
+                sync_.target = 0;
+                sync_.startTicks = engine.player().ticks();
+                break;
+            case 0xFC:
+                sync_.stopPos = engine.player().orderPos();
+                sync_.stopRow = engine.player().row();
+                engine.stop();
+                sync_.running = false;
+                break;
+            default: break;
+        }
+        return;
+    }
+    const uint8_t type = m.status & 0xF0, ch = uint8_t((m.status & 0x0F) + 1);
+    if (settings_.midiChannel && ch != settings_.midiChannel) return;
+    if (type == 0x90 && m.d2) {
+        ui.midiNote(m.d1, true);
+    } else if (type == 0x80 || type == 0x90) {
+        ui.midiNote(m.d1, false);
+    } else if (type == 0xB0) {
+        // CC: live cutoff (74), resonance (71) and pulse width (70) on top of
+        // the song, as on the Perform page; 123 all notes off.
+        PerformOverrides& po = engine.playerMutable().perform;
+        switch (m.d1) {
+            case 74:
+                for (int c = 0; c < kChips; ++c) po.cutoffOffset[c] = int16_t((int(m.d2) - 64) * 24);
+                break;
+            case 71:
+                for (int c = 0; c < kChips; ++c) po.resonance[c] = int8_t(m.d2 >> 3);
+                break;
+            case 70:
+                for (int v = 0; v < kChannels; ++v) po.pwOffset[v] = int16_t((int(m.d2) - 64) * 32);
+                break;
+            case 123:
+                for (int v = 0; v < kChannels; ++v) engine.noteOff(v);
+                break;
+            default: break;
+        }
+    }
+}
+
+void App::midiSyncUpdate() {
+    if (!settings_.syncIn) return;
+    const uint32_t nowMs = p_.clock->millis();
+    if (!sync_.periodUs || nowMs - sync_.lastSeenMs > 500) {   // no clock: own tempo
+        if (sync_.locked) engine.setExternalTickRate(0);
+        sync_.locked = false;
+        sync_.bpmX10 = 0;
+        return;
+    }
+    // Ticks a second = clocks a second x speed / 6, nudged so the song
+    // position follows the clocks counted since Start.
+    const uint32_t speed = engine.player().speed() ? engine.player().speed() : 6;
+    double rate = 1e6 / double(sync_.periodUs) * double(speed) / 6.0;
+    if (sync_.running && engine.player().playing()) {
+        const double target = sync_.target;
+        const double actual = double(engine.player().ticks() - sync_.startTicks);
+        double c = (target - actual) * 0.02;
+        c = c < -0.05 ? -0.05 : (c > 0.05 ? 0.05 : c);
+        rate *= 1.0 + c;
+    }
+    engine.setExternalTickRate(uint32_t(rate * 1000.0));
+    sync_.locked = true;
+    sync_.bpmX10 = uint32_t(600000000.0 / (double(sync_.periodUs) * 24.0) * 10.0 / 10.0);
+}
+
+bool App::sidPlay(const char* path, int song) {
+    sidStop();
+    sidError_ = "";
+    if (!p_.storage || !p_.c64Memory || !p_.scratch) {
+        sidError_ = "not available on this platform";
+        return false;
+    }
+    sidPlayer_.setMemory(p_.c64Memory, p_.c64Memory + c64::SidPlayer::kRamBytes);
+    uint32_t n = 0;
+    const uint32_t cap = 0x7C + 2 + 65536 + 1024;
+    uint8_t* buf = static_cast<uint8_t*>(p_.scratch);
+    if (p_.scratchBytes < cap || !readFile(path, buf, cap, n)) {
+        sidError_ = "cannot read the file";
+        return false;
+    }
+    const char* err = nullptr;
+    if (!sidPlayer_.load(buf, n, sidInfo_, err)) {
+        sidError_ = err ? err : "not a .sid file";
+        return false;
+    }
+    c64::SidWrite initWrites[c64::SidPlayer::kMaxWrites];
+    int nInit = 0;
+    if (!sidPlayer_.start(song ? song : sidInfo_.start, initWrites, &nInit)) {
+        sidError_ = "the tune's init routine crashed";
+        return false;
+    }
+    std::snprintf(sidPath_, sizeof sidPath_, "%s", path);
+    engine.stop();
+    for (int c = 0; c < kChips; ++c) {
+        const uint8_t m = sidInfo_.model[c];
+        engine.setModel(c, m == 1 ? sid::Model::k6581 : sid::Model::k8580);
+    }
+    engine.setClock(sidInfo_.ntsc ? SidClock::kNtsc : SidClock::kPal);
+    sidPlaying_ = true;
+    updateSidCopy();   // before the tune's first frames: a two-SID tune keeps SID 2
+    engine.startExternal(sidPlayer_.rateMilliHz());
+    engine.pushFrame(initWrites, nInit);   // what init set up (volume, filter), first
+    sidPlaying_ = true;
+    sidFramesPlayed_ = 0;
+    sidService();
+    return true;
+}
+
+void App::sidStop() {
+    if (!sidPlaying_) return;
+    sidPlaying_ = false;
+    engine.stopExternal();
+    engine.applySongConfig();   // the song's SID models, clock, balance
+    updateSidCopy();
+}
+
+void App::sidService() {
+    // Keep about 8 frames (160 ms) queued: the main loop may be busy drawing.
+    c64::SidWrite w[c64::SidPlayer::kMaxWrites];
+    for (int guard = 0; guard < 16 && engine.framesQueued() < 8; ++guard) {
+        int n = 0;
+        if (!sidPlayer_.frame(w, n)) {
+            sidError_ = "the tune crashed or hung (stopped)";
+            sidStop();
+            return;
+        }
+        engine.pushFrame(w, n);
+        ++sidFramesPlayed_;
+    }
+}
+
+uint32_t App::sidSeconds() const {
+    const uint32_t rate = sidPlayer_.rateMilliHz();
+    const uint32_t queued = engine.framesQueued();
+    const uint32_t played = sidFramesPlayed_ > queued ? sidFramesPlayed_ - queued : 0;
+    return rate ? uint32_t(uint64_t(played) * 1000u / rate) : 0;
 }
 
 bool App::screenshot(char* name, uint32_t cap) {
@@ -175,9 +437,16 @@ bool App::loadSettings() {
         unsigned v = 0;
         if (std::sscanf(line, "volume=%u", &v) == 1) settings_.volume = uint8_t(v > 100 ? 100 : v);
         else if (std::sscanf(line, "theme=%u", &v) == 1) settings_.theme = uint8_t(v);
+        else if (std::sscanf(line, "midi_channel=%u", &v) == 1) settings_.midiChannel = uint8_t(v > 16 ? 0 : v);
+        else if (std::sscanf(line, "midi_clock_out=%u", &v) == 1) settings_.clockOut = uint8_t(v & 3);
+        else if (std::sscanf(line, "midi_sync_in=%u", &v) == 1) settings_.syncIn = uint8_t(v > 2 ? 0 : v);
+        else if (std::sscanf(line, "asid_out=%u", &v) == 1) settings_.asidOut = uint8_t(v & 3);
+        else if (std::sscanf(line, "sid_copy=%u", &v) == 1) settings_.sidCopy = uint8_t(v ? 1 : 0);
         line = next;
     }
     engine.setMasterVolume(settings_.volume);
+    engine.setClockPorts(settings_.clockOut);
+    engine.setAsidPorts(settings_.asidOut);
     ui::applyTheme(settings_.theme);
     settings_.theme = uint8_t(ui::currentTheme());
     ui.requestRedraw();
@@ -188,9 +457,13 @@ bool App::saveSettings() {
     settingsDirty_ = false;
     if (!p_.storage) return false;
     ensureDirs();
-    char buf[96];
-    const int n = std::snprintf(buf, sizeof buf, "volume=%u\ntheme=%u\n", unsigned(settings_.volume),
-                                unsigned(settings_.theme));
+    char buf[192];
+    const int n = std::snprintf(buf, sizeof buf,
+                                "volume=%u\ntheme=%u\nmidi_channel=%u\nmidi_clock_out=%u\nmidi_sync_in=%u\nasid_out=%u\n"
+                                "sid_copy=%u\n",
+                                unsigned(settings_.volume), unsigned(settings_.theme), unsigned(settings_.midiChannel),
+                                unsigned(settings_.clockOut), unsigned(settings_.syncIn), unsigned(settings_.asidOut),
+                                unsigned(settings_.sidCopy));
     const ot::IStorage::Handle h = p_.storage->open(kSettingsFile, ot::IStorage::kWrite);
     if (h < 0) return false;
     const bool ok = p_.storage->write(h, buf, uint32_t(n)) == n;
@@ -249,6 +522,7 @@ bool App::loadPath(const char* path) {
     engine.panic();
     engine.applySongConfig();
     engine.release();
+    undo_.reset();
     ui.songChanged();
     return res == project::Result::kOk;
 }
@@ -284,6 +558,7 @@ void App::newSong() {
     engine.release();
     std::strcpy(fileName_, "UNTITLED");
     dirty_ = false;
+    undo_.reset();
     ui.songChanged();
 }
 
@@ -360,6 +635,7 @@ bool App::importGoat(const char* file) {
         }
         if (!goat::importInstrument(*ins, ui.inst, song, goatReport_)) return false;
         markDirty();
+        ui.songEdited();   // the instrument screen re-reads the slot
         return true;
     }
     const goat::Result r = goat::readSong({raw, size}, *gt);
@@ -374,6 +650,7 @@ bool App::importGoat(const char* file) {
     engine.panic();
     engine.applySongConfig();
     engine.release();
+    undo_.reset();
     ui.songChanged();
     if (ok) {
         // The project keeps the GT file's name (without extension).
@@ -500,6 +777,96 @@ int App::listGoat(char (*names)[kNameLen + 5], int cap) {
             std::memcpy(names[j - 1], t, sizeof t);
         }
     return ctx.n;
+}
+
+const char* App::instrumentFile(int i) const {
+    if (i < 0 || i >= instCount_ || !p_.listMemory) return "";
+    return reinterpret_cast<const char*>(p_.listMemory + uint32_t(i) * kInstRecord);
+}
+
+int App::scanInstruments() {
+    instCount_ = 0;
+    if (!p_.storage || !p_.listMemory || p_.listBytes < kInstListBytes) return 0;
+    struct Ctx {
+        App* app;
+        const char* folder;
+        char (*sub)[40];
+        int subs;
+    };
+    // Folders first (one level), then the files of the top folder and of each.
+    char folders[32][40];
+    Ctx ctx{this, "", folders, 0};
+    auto add = [](const ot::IStorage::DirEntry& e, void* c) {
+        Ctx& x = *static_cast<Ctx*>(c);
+        if (e.isDir) {
+            if (!x.folder[0] && x.subs < 32 && std::strlen(e.name) < 40) std::snprintf(x.sub[x.subs++], 40, "%s", e.name);
+            return true;
+        }
+        if (!endsWith(e.name, ".ins") && !endsWith(e.name, ".INS")) return true;
+        if (e.name[0] == '.') return true;   // macOS "._NAME.ins" metadata files
+        if (x.app->instCount_ >= kInstMax) return false;
+        char* rec = reinterpret_cast<char*>(x.app->p_.listMemory + uint32_t(x.app->instCount_) * kInstRecord);
+        const int n = std::snprintf(rec, kInstRecord, "%s%s%s", x.folder, x.folder[0] ? "/" : "", e.name);
+        if (n > 0 && n < kInstRecord) ++x.app->instCount_;
+        return true;
+    };
+    p_.storage->listDir(kInstDir, add, &ctx);
+    for (int f = 0; f < ctx.subs; ++f) {
+        char path[96];
+        std::snprintf(path, sizeof path, "%s/%s", kInstDir, folders[f]);
+        ctx.folder = folders[f];
+        p_.storage->listDir(path, add, &ctx);
+    }
+    // Sorted (case-insensitive), so folders group together.
+    char* base = reinterpret_cast<char*>(p_.listMemory);
+    auto less = [](const char* a, const char* b) {
+        for (;; ++a, ++b) {
+            const int x = std::toupper(static_cast<unsigned char>(*a)), y = std::toupper(static_cast<unsigned char>(*b));
+            if (x != y || !x) return x < y;
+        }
+    };
+    for (int i = 1; i < instCount_; ++i)
+        for (int j = i; j > 0 && less(base + j * kInstRecord, base + (j - 1) * kInstRecord); --j) {
+            char t[kInstRecord];
+            std::memcpy(t, base + j * kInstRecord, kInstRecord);
+            std::memcpy(base + j * kInstRecord, base + (j - 1) * kInstRecord, kInstRecord);
+            std::memcpy(base + (j - 1) * kInstRecord, t, kInstRecord);
+        }
+    return instCount_;
+}
+
+bool App::loadInstrumentFile(int i, int slot) {
+    goatReport_ = goat::Report{};
+    goat::Song* gt = goatScratch();
+    if (!p_.storage || !gt || i < 0 || i >= instCount_) return false;
+    uint8_t* raw = static_cast<uint8_t*>(p_.scratch) + ((sizeof(goat::Song) + 15) & ~size_t(15));
+    const uint32_t rawCap = uint32_t(p_.scratchBytes - ((sizeof(goat::Song) + 15) & ~size_t(15)));
+    char path[128];
+    std::snprintf(path, sizeof path, "%s/%s", kInstDir, instrumentFile(i));
+    uint32_t size = 0;
+    if (!readFile(path, raw, rawCap, size)) return false;
+    goat::InsFile* ins = reinterpret_cast<goat::InsFile*>(gt);
+    if (goat::readIns({raw, size}, *ins) != goat::Result::kOk) return false;
+    return goat::importInstrument(*ins, slot, song, goatReport_);
+}
+
+bool App::saveInstrumentFile(int slot, const char* name) {
+    goatReport_ = goat::Report{};
+    goat::InsFile ins;
+    if (!p_.storage || !goat::exportInstrument(song, slot, ins)) return false;
+    ensureDirs();
+    p_.storage->mkdir(kInstDir);
+    char path[128];
+    std::snprintf(path, sizeof path, "%s/User", kInstDir);
+    p_.storage->mkdir(path);
+    std::snprintf(path, sizeof path, "%s/User/%s.ins", kInstDir, name);
+    const ot::IStorage::Handle h = p_.storage->open(path, ot::IStorage::kWrite);
+    if (h < 0) return false;
+    SinkFile out(*p_.storage, h);
+    const bool ok = goat::writeIns(ins, out);
+    p_.storage->close(h);
+    if (!ok) p_.storage->remove(path);
+    return ok;
 }
 
 int App::loadKit() {

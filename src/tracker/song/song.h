@@ -81,13 +81,18 @@ struct Pattern {
     uint16_t autoLanes() const;          // lanes used anywhere
 };
 
+// The defaults are the init patch: a sawtooth that sounds without any table
+// rows (A0 D9 S10 R9). Until 0.8 the default was silent (AD 09, SR 00, first
+// wave 09 = test + gate); project files from then still load that way where
+// a pattern uses the slot (project_file.cpp, "IDEF").
 struct Instrument {
+    static constexpr uint8_t kLegacyAd = 0x09, kLegacySr = 0x00, kLegacyWave = 0x09;
     char name[kNameLen + 1] = {};
     uint8_t ad = 0x09;                 // attack/decay register value
-    uint8_t sr = 0x00;                 // sustain/release register value
+    uint8_t sr = 0xA9;                 // sustain/release register value
     // Control value on the note's init tick: 01..FD written, FE gate off /
     // FF gate on with the waveform unchanged, 00 neither changed.
-    uint8_t firstWave = 0x09;
+    uint8_t firstWave = 0x21;
     uint8_t wavePtr = 0;               // 1-based table rows, 0 = none
     uint8_t pulsePtr = 0;
     uint8_t filterPtr = 0;
@@ -97,8 +102,8 @@ struct Instrument {
     // row is fetched and a new note gets gate off + hard restart (0: no
     // early fetch); 0x80 = no hard restart, 0x40 = no gate off (legato).
     uint8_t gateTimer = 2;
-    bool empty() const;
-    void clear(int index);
+    bool empty() const;                // the init patch (settings; any name)
+    void clear(int index);             // init patch named "INSTR nn"
 };
 
 enum TableKind : uint8_t { kWaveTable, kPulseTable, kFilterTable, kSpeedTable, kTableKinds };
@@ -144,15 +149,25 @@ struct ModSettings {
     int8_t pan[kChannels] = {};   // -100 left .. 100 right; 0 = follow the SID balance
     bool any() const;
 };
+// Per-track level (Master mixer): a gain on the voice before the filter. The
+// SID itself has one volume per chip ($18, command D); this is extra, so
+// neither GoatTracker nor .sid exports can carry it.
+struct MixSettings {
+    uint8_t volume[kChannels] = {100, 100, 100, 100, 100, 100};   // 0..100 %
+    bool any() const;
+};
 const char* lfoTargetName(uint8_t target);
 const char* lfoShapeName(uint8_t shape);
 
 struct Song {
     char name[kNameLen + 1] = {};
     char author[kNameLen + 1] = {};
-    // Tick rate = bpm * 2 / 5 Hz (125 = 50 Hz PAL frame, 150 = 60 Hz).
+    // Frame rate = bpm * 2 / 5 Hz (125 = 50 Hz PAL frame, 150 = 60 Hz);
+    // the player runs `multi` ticks per frame (multispeed, 1..kMaxMulti),
+    // so the tick rate is bpm * 2 / 5 * multi Hz.
     uint8_t bpm = 125;
     uint8_t speed = 6;                 // ticks per row
+    uint8_t multi = 1;
     uint8_t hrAD = 0x0F, hrSR = 0x00;  // ADSR written for the hard restart
     uint8_t orderLen = 1;
     uint8_t restartPos = 0;
@@ -165,12 +180,15 @@ struct Song {
     audio::FxSettings fx;
     uint8_t drumVolume = 80;           // PCM drums, 0..100 %
     ModSettings mod;
+    MixSettings mix;
     // kPatternCount patterns, owned by the app (SDRAM on the device).
     Pattern* patterns = nullptr;
 
     // Empty song: one order entry (pattern 0), instrument 1 a default pulse
     // lead with its wave/pulse table rows. Keeps `patterns` and clears them.
     void clear();
+    static constexpr uint8_t kMaxMulti = 8;
+    uint8_t multiSpeed() const { return multi >= 1 && multi <= kMaxMulti ? multi : 1; }
     Pattern& pattern(int i) { return patterns[i & (kPatternCount - 1)]; }
     const Pattern& pattern(int i) const { return patterns[i & (kPatternCount - 1)]; }
     // Features that GoatTracker export would lose (PLAN.md §11): non-PAL/NTSC
@@ -189,6 +207,7 @@ enum ExtFeature : uint32_t {
     kExtEffects = 1u << 3,             // delay / chorus / reverb
     kExtDrums = 1u << 4,               // PCM drum column
     kExtModulation = 1u << 5,          // LFOs, per-voice pan
+    kExtMixer = 1u << 6,               // per-track level below 100 %
 };
 
 // Note value (1..96) -> "C-4" (3 chars + NUL); key on/off "+++"/"===";

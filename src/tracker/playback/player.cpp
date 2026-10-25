@@ -160,7 +160,8 @@ void Player::noteOff(int ch) {
 
 uint32_t Player::samplesPerTick16(uint32_t sampleRateMilliHz) const {
     const uint32_t bpm = song_ && song_->bpm >= 16 ? song_->bpm : 125;
-    return uint32_t(uint64_t(sampleRateMilliHz) * 5u * 65536u / (2000u * bpm));
+    const uint32_t multi = song_ ? song_->multiSpeed() : 1;
+    return uint32_t(uint64_t(sampleRateMilliHz) * 5u * 65536u / (2000u * bpm * multi));
 }
 
 uint16_t Player::speedEntry(uint8_t row) const {
@@ -315,7 +316,8 @@ void Player::lfoStep() {
     for (int k = 0; k < 2; ++k) {
         const Lfo& l = song_->mod.lfo[k];
         if (!l.active()) continue;
-        const uint32_t period = l.period < 2 ? 2 : l.period;
+        // The period counts frames: multispeed does not speed the LFOs up.
+        const uint32_t period = (l.period < 2 ? 2u : uint32_t(l.period)) * song_->multiSpeed();
         const uint32_t ph = lfoTick_[k] % period;
         const float x = float(ph) / float(period);
         float v;
@@ -650,6 +652,13 @@ void Player::filterStep(ChipState& s) {
         return;
     }
     s.filterPtr = 0;
+}
+
+void Player::rewriteChip(int chip) {
+    if (chip < 0 || chip >= 2) return;
+    for (int v = 0; v < 3; ++v)
+        for (int16_t& sh : ch_[chip * 3 + v].sh) sh = -1;
+    for (int16_t& sh : chip_[chip].sh) sh = -1;
 }
 
 void Player::put(int16_t& shadow, uint8_t chip, uint8_t reg, uint8_t val) {

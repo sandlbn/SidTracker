@@ -12,10 +12,13 @@
 #include <atomic>
 #include <cstdint>
 
+#include "app/midi.h"
 #include "audio/effects.h"
 #include "audio/mixer.h"
 #include "audio/pcm.h"
 #include "sid/sid.h"
+#include "c64/sid_player.h"
+#include "hal_api.h"
 #include "tracker/playback/player.h"
 #include "tracker/song/song.h"
 
@@ -86,15 +89,49 @@ public:
     // Silence and reset player and chips (after a song load).
     void panic() { push(kCmdPanic); }
 
+    // External SID source (SID player): the tracker player pauses, the
+    // chips reset, and every tick (`tickMilliHz` a second) applies one
+    // queued frame of register writes. Song effects, drums and voice pan are
+    // off meanwhile. Main loop.
+    static constexpr uint32_t kFrames = 16;
+    void startExternal(uint32_t tickMilliHz);
+    void stopExternal() {
+        extReq_ = false;
+        push(kCmdExternal, 0);
+    }
+    bool external() const { return extReq_; }
+    // MIDI out (audio context, per tick): ASID frames of the SID register
+    // writes and MIDI clock (24 per beat = 6 per row; Start / Stop follow
+    // playback). Port masks: bit 0 DIN, bit 1 USB. Main loop setters.
+    void setMidiOut(ot::IMidiPort* port) { midiOut_ = port; }
+    void setAsidPorts(uint8_t mask);
+    void setClockPorts(uint8_t mask);
+    // External clock (MIDI sync in): ticks a second in milli-Hz; 0 = the
+    // song's own tempo. Main loop.
+    void setExternalTickRate(uint32_t milliHz) {
+        extTick16Req_.store(milliHz ? uint32_t(uint64_t(fs_) * 65536u / milliHz) : 0, std::memory_order_release);
+    }
+    // Queues one frame (false: queue full). Main loop only.
+    bool pushFrame(const c64::SidWrite* w, int n);
+    uint32_t framesQueued() const {
+        return fHead_.load(std::memory_order_acquire) - fTail_.load(std::memory_order_acquire);
+    }
+
     // Settings, applied at the next block start.
     void setModel(int chip, sid::Model m);
     void setClock(SidClock c);
     void setBalance(uint8_t width);
     void setMasterVolume(uint8_t percent);
+    // SID 2 mirrors SID 1 (writes, model, mutes, levels): a one-SID song or
+    // .sid tune plays on both stereo sides and on both real chips over ASID.
+    // The song's own SID 2 writes are dropped while it is on.
+    void setSidCopy(bool on);
+    bool sidCopy() const { return req_.sidCopy; }
     void setMuted(int ch, bool on);
     void setSolo(int ch, bool on);
     bool muted(int ch) const { return (muteMask_ >> ch) & 1; }
     bool solo(int ch) const { return (soloMask_ >> ch) & 1; }
+    bool anySolo() const { return soloMask_ != 0; }
     // Copies the song's SID configuration into the settings.
     void applySongConfig();
     // Worst-case load for profiling (M2/M3 hardware tests): all six voices
@@ -134,7 +171,8 @@ public:
     void drum(uint8_t slot) override;
 
 private:
-    enum CmdType : uint8_t { kCmdPlaySong, kCmdPlayPattern, kCmdStop, kCmdNoteOn, kCmdNoteOff, kCmdPanic, kCmdDrum };
+    enum CmdType : uint8_t { kCmdPlaySong, kCmdPlayPattern, kCmdStop, kCmdNoteOn, kCmdNoteOff, kCmdPanic, kCmdDrum,
+                             kCmdExternal };
     struct Cmd {
         uint8_t type, a, b, c;
     };
@@ -167,6 +205,31 @@ private:
     float panBuf_[kChips][2][kBlock] = {};   // individually panned voices
     void copyPanned(int chip, uint32_t pos, uint32_t n);
 
+    // SID player frames: single producer (main loop), single consumer (audio).
+    struct Frame {
+        uint8_t n;
+        uint8_t gen;   // startExternal() generation: older frames are dropped
+        c64::SidWrite w[c64::SidPlayer::kMaxWrites];
+    };
+    Frame frames_[kFrames];
+    std::atomic<uint32_t> fHead_{0}, fTail_{0};
+    std::atomic<uint32_t> extRate_{50125};
+    bool external_ = false;            // audio side
+    bool extReq_ = false;              // main loop side
+    uint8_t extGen_ = 0;               // main loop side: generation of new frames
+    uint8_t activeGen_ = 0;            // audio side
+    uint32_t extTick16_ = 0;
+    void applyFrame();
+    void midiTick();
+    bool midiSend(uint8_t ports, const uint8_t* d, uint32_t n);
+    void asidImage();   // queue every register of both chips
+    uint8_t asidStartPending_ = 0;   // ports whose ASID start was refused (USB not up yet)
+    ot::IMidiPort* midiOut_ = nullptr;
+    midi::AsidEncoder asid_;
+    uint8_t clockAcc_ = 0;
+    bool wasPlaying_ = false;
+    std::atomic<uint32_t> extTick16Req_{0};
+
     Cmd ring_[kRing];
     std::atomic<uint32_t> head_{0}, tail_{0};
 
@@ -179,6 +242,8 @@ private:
         uint8_t mute = 0, solo = 0;
         bool stress = false;
         bool fx = true;
+        uint8_t asidPorts = 0, clockPorts = 0;
+        bool sidCopy = false;   // SID 2 plays a copy of SID 1 (a one-SID song or tune)
     };
     Settings req_;
     Settings applied_;

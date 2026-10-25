@@ -31,13 +31,13 @@ private:
     static constexpr int kMax = 64;
     static constexpr int kNameCap = kNameLen + 5;   // name + extension
     void refresh();
-    bool confirm(uint8_t action, const char* question);
+    bool confirm(uint8_t action, const char* question, const char* ok);
     bool projectButton(uint8_t id);
     bool goatButton(uint8_t id);
 
     char names_[kMax][kNameCap] = {};
+    char saveName_[kNameLen + 1] = {};   // SAVE NEW: the typed name (kept for the overwrite question)
     int count_ = 0, sel_ = 0;
-    uint8_t pending_ = 0;   // action awaiting its second press (button id + 1)
     bool goat_ = false;
     bool reportShown_ = false;
     goat::Report exportCheck_;

@@ -15,6 +15,9 @@ Contents (unzip onto the root of the Tracker's SD card)
   SIDTracker/Projects/*.sidt   example songs (File > LOAD)
   SIDTracker/SID/*.sid         the same songs exported as C64 .sid files
                                (play them in any SID player)
+  SIDTracker/Instruments/      instrument library (.ins): Instrument >
+                               SOUNDS > CARD; also loads in GoatTracker
+  MANUAL.md                    the manual: start here (any text viewer)
 
 Install
 -------
@@ -38,8 +41,12 @@ Example songs (original music, MIT licence like the firmware)
   FILTERS      both SIDs (8580): slow resonant filter sweeps, 100 bpm
   CHIPMARCH    one SID: swing tempo, slides, portamento, vibrato
 
-New in 0.6
+New in 0.7
 ----------
+- File > F7 SID PLAYER: plays C64 .sid files (PSID, one or two SIDs,
+  subtunes) from anywhere on the card, e.g. the High Voltage SID Collection.
+- Instrument > F2 DESIGN: shape a sound with synth controls.
+- Master: mixer with level meters; Config F7 / F8: firmware update.
 - Instrument > F7 SOUNDS: 49 ready instruments (bass, lead, chord, drum,
   pad, fx, keys) and an arpeggiator that writes chord programs.
 - File > F6: export the song as a C64 .sid file (/SIDTracker/SID).

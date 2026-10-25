@@ -57,6 +57,78 @@ void Engine::setBalance(uint8_t width) {
     version_.fetch_add(1, std::memory_order_release);
 }
 
+void Engine::setAsidPorts(uint8_t mask) {
+    req_.asidPorts = uint8_t(mask & 3);
+    version_.fetch_add(1, std::memory_order_release);
+}
+
+void Engine::setClockPorts(uint8_t mask) {
+    req_.clockPorts = uint8_t(mask & 3);
+    version_.fetch_add(1, std::memory_order_release);
+}
+
+bool Engine::midiSend(uint8_t ports, const uint8_t* d, uint32_t n) {
+    if (!midiOut_ || !n) return true;
+    bool ok = true;
+    if (ports & 1) ok = midiOut_->send(ot::MidiPortId::kDin, d, n) && ok;
+    if (ports & 2) ok = midiOut_->send(ot::MidiPortId::kUsb, d, n) && ok;
+    return ok;
+}
+
+void Engine::asidImage() {
+    if (!applied_.asidPorts) return;
+    for (int c = 0; c < kChips; ++c)
+        for (uint8_t r = 0; r < 25; ++r) asid_.set(uint8_t(c), r, chips_[c].shadow(r));
+}
+
+void Engine::midiTick() {
+    // Clock: 6 per row, so 6 / speed per tick (speed 6: one per tick).
+    const bool playing = !external_ && player_.playing() && !applied_.stress;
+    if (applied_.clockPorts) {
+        static const uint8_t kStart = 0xFA, kStop = 0xFC, kClock = 0xF8;
+        if (playing && !wasPlaying_) {
+            midiSend(applied_.clockPorts, &kStart, 1);
+            clockAcc_ = 0;
+        } else if (!playing && wasPlaying_) {
+            midiSend(applied_.clockPorts, &kStop, 1);
+        }
+        if (playing) {
+            const uint8_t speed = player_.speed() ? player_.speed() : 6;
+            clockAcc_ = uint8_t(clockAcc_ + 6);
+            while (clockAcc_ >= speed) {
+                midiSend(applied_.clockPorts, &kClock, 1);
+                clockAcc_ = uint8_t(clockAcc_ - speed);
+            }
+        }
+    }
+    wasPlaying_ = playing;
+    if (asidStartPending_) {   // a port that refused the start (USB not enumerated yet): retry
+        uint8_t m[4];
+        const uint32_t n = midi::AsidEncoder::start(m);
+        for (uint8_t bit = 1; bit <= 2; bit <<= 1)
+            if ((asidStartPending_ & bit) && midiSend(bit, m, n)) {
+                asidStartPending_ = uint8_t(asidStartPending_ & ~bit);
+                asidImage();   // the receiver starts from the full register image
+            }
+    }
+    if (applied_.asidPorts && asid_.pending()) {
+        // One message per chip; a refused one keeps its registers for the
+        // next tick, so no write (gate off, volume) is lost for good.
+        uint8_t buf[midi::AsidEncoder::kMaxMessage];
+        for (int c = 0; c < midi::AsidEncoder::kChips; ++c) {
+            uint32_t taken = 0;
+            const uint32_t n = asid_.build(c, buf, taken);
+            if (n && !midiSend(applied_.asidPorts, buf, n)) asid_.restore(c, taken);
+        }
+    }
+}
+
+void Engine::setSidCopy(bool on) {
+    if (req_.sidCopy == on) return;
+    req_.sidCopy = on;
+    version_.fetch_add(1, std::memory_order_release);
+}
+
 void Engine::setMasterVolume(uint8_t percent) {
     req_.volume = percent > 100 ? 100 : percent;
     version_.fetch_add(1, std::memory_order_release);
@@ -132,8 +204,47 @@ Profile Engine::takeProfile() {
 
 void Engine::sidWrite(uint8_t chip, uint8_t reg, uint8_t val) {
     if (chip >= kChips) return;
+    if (applied_.sidCopy) {
+        if (chip == 1) return;   // SID 2 follows SID 1 instead
+        chips_[1].write(reg, val);
+        if (applied_.asidPorts) asid_.write(1, reg, val);
+    }
     chips_[chip].write(reg, val);
+    if (applied_.asidPorts) asid_.write(chip, reg, val);
     if (tap_) tap_->onWrite(samples_, chip, reg, val);
+}
+
+void Engine::startExternal(uint32_t tickMilliHz) {
+    extRate_.store(tickMilliHz ? tickMilliHz : 50125, std::memory_order_release);
+    extReq_ = true;
+    ++extGen_;
+    push(kCmdExternal, 1, extGen_);
+}
+
+bool Engine::pushFrame(const c64::SidWrite* w, int n) {
+    const uint32_t h = fHead_.load(std::memory_order_relaxed);
+    if (h - fTail_.load(std::memory_order_acquire) >= kFrames) return false;
+    Frame& f = frames_[h % kFrames];
+    if (n > c64::SidPlayer::kMaxWrites) n = c64::SidPlayer::kMaxWrites;
+    for (int i = 0; i < n; ++i) f.w[i] = w[i];
+    f.n = uint8_t(n);
+    f.gen = extGen_;
+    fHead_.store(h + 1, std::memory_order_release);
+    return true;
+}
+
+void Engine::applyFrame() {
+    uint32_t t = fTail_.load(std::memory_order_relaxed);
+    const uint32_t h = fHead_.load(std::memory_order_acquire);
+    // Frames of an earlier tune are skipped; a frame of a newer one (its start
+    // command not drained yet) waits.
+    while (t != h && int8_t(uint8_t(frames_[t % kFrames].gen - activeGen_)) < 0) ++t;
+    if (t != h && frames_[t % kFrames].gen == activeGen_) {
+        const Frame& f = frames_[t % kFrames];
+        for (int i = 0; i < f.n; ++i) sidWrite(f.w[i].chip, f.w[i].reg, f.w[i].val);
+        ++t;
+    }   // else: a late frame, the registers stay as they are
+    fTail_.store(t, std::memory_order_release);
 }
 
 void Engine::drain() {
@@ -155,10 +266,21 @@ void Engine::drain() {
             case kCmdNoteOn: player_.noteOn(c.a, c.b, c.c); break;
             case kCmdNoteOff: player_.noteOff(c.a); break;
             case kCmdDrum: pcm_.trigger(kit_.slot(c.a), c.a); break;
+            case kCmdExternal:
+                external_ = c.a != 0;
+                player_.reset();
+                pcm_.stopAll();
+                for (sid::Chip& ch : chips_) ch.reset();
+                asidImage();   // the receiver resets too
+                if (external_) activeGen_ = c.b;   // older frames are skipped by applyFrame()
+                extTick16_ = uint32_t(uint64_t(fs_) * 65536u / extRate_.load(std::memory_order_acquire));
+                toTick16_ = 0;
+                break;
             case kCmdPanic:
                 pcm_.stopAll();
                 player_.reset();
                 for (sid::Chip& ch : chips_) ch.reset();
+                asidImage();
                 mixer_.reset();
                 break;
         }
@@ -173,13 +295,46 @@ void Engine::applySettings() {
     const Settings s = req_;
     const uint32_t clock = s.clock == SidClock::kNtsc ? sid::kNtscClockHz : sid::kPalClockHz;
     for (int i = 0; i < kChips; ++i) {
-        chips_[i].setModel(s.model[i]);
+        chips_[i].setModel(s.sidCopy ? s.model[0] : s.model[i]);
         chips_[i].setClock(clock);
     }
-    mixer_.setBalance(s.balance);
+    if (!s.sidCopy && applied_.sidCopy) {
+        // The copy ends: SID 2 is silenced and the player writes its own
+        // SID 2 state again (notes recorded meanwhile sound).
+        chips_[1].reset();
+        if (s.asidPorts)
+            for (uint8_t r = 0; r < 25; ++r) asid_.set(1, r, 0);
+        player_.rewriteChip(1);
+    }
+    if (s.sidCopy && !applied_.sidCopy) {   // the copy starts from SID 1's registers
+        for (uint8_t r = 0; r < 25; ++r) {
+            chips_[1].write(r, chips_[0].shadow(r));
+            if (s.asidPorts) asid_.set(1, r, chips_[0].shadow(r));
+        }
+    }
+    // A copy is the same sound on both chips: one chip per side (centred,
+    // not summed into twice the level).
+    mixer_.setBalance(s.sidCopy ? 100 : s.balance);
     mixer_.setMasterGain(float(s.volume) / 100.0f);
+    if (s.asidPorts != applied_.asidPorts) {   // ASID start / stop on the ports that change
+        uint8_t m[4];
+        const uint8_t added = uint8_t(s.asidPorts & ~applied_.asidPorts);
+        midiSend(uint8_t(applied_.asidPorts & ~s.asidPorts), m, midi::AsidEncoder::stop(m));
+        asidStartPending_ = uint8_t((asidStartPending_ | added) & s.asidPorts);   // sent by midiTick
+        if (!s.asidPorts) asid_.clear();   // forget a half frame
+    }
+    if (s.clockPorts != applied_.clockPorts && wasPlaying_) {   // Stop / Start on the ports that change
+        static const uint8_t kStart = 0xFA, kStop = 0xFC;
+        midiSend(uint8_t(applied_.clockPorts & ~s.clockPorts), &kStop, 1);
+        const uint8_t added = uint8_t(s.clockPorts & ~applied_.clockPorts);
+        if (added) {
+            midiSend(added, &kStart, 1);
+            clockAcc_ = 0;
+        }
+    }
     for (int ch = 0; ch < kChannels; ++ch) {
-        const bool m = ((s.mute >> ch) & 1) || (s.solo && !((s.solo >> ch) & 1));
+        const int src = s.sidCopy && ch >= 3 ? ch - 3 : ch;   // the copy mutes with its original
+        const bool m = ((s.mute >> src) & 1) || (s.solo && !((s.solo >> src) & 1));
         chips_[ch / 3].setVoiceMuted(ch % 3, m);
     }
     if (s.stress != applied_.stress) {
@@ -245,20 +400,31 @@ void Engine::fill(int16_t* out, uint32_t frames) {
     const bool stress = applied_.stress;
     // Per-voice pan (M8): linear like the SID balance, 0 = follow the chip.
     for (int ch = 0; ch < kChannels; ++ch) {
-        const int p = song_->mod.pan[ch];
-        const float gl = p > 0 ? 1.0f - float(p) / 100.0f : 1.0f;
-        const float gr = p < 0 ? 1.0f + float(p) / 100.0f : 1.0f;
+        const int src = applied_.sidCopy && ch >= 3 ? ch - 3 : ch;   // the copy pans / levels with its original
+        const int p = external_ ? 0 : song_->mod.pan[src];
+        // While copying, a panned voice plays on both chips: each at half level.
+        const float k = applied_.sidCopy ? 0.5f : 1.0f;
+        const float gl = k * (p > 0 ? 1.0f - float(p) / 100.0f : 1.0f);
+        const float gr = k * (p < 0 ? 1.0f + float(p) / 100.0f : 1.0f);
         chips_[ch / 3].setVoicePan(ch % 3, p != 0, gl, gr);
+        chips_[ch / 3].setVoiceGain(ch % 3, external_ ? 1.0f : float(song_->mix.volume[src]) * 0.01f);
     }
     uint32_t pos = 0;
     while (pos < frames) {
         if (toTick16_ < 0x10000u) {
-            if (!stress) {
-                const uint32_t tp = now();
-                player_.tick();
-                account(Profile::kPlayer, now() - tp);
+            if (external_) {
+                applyFrame();
+                toTick16_ += extTick16_;
+            } else {
+                if (!stress) {
+                    const uint32_t tp = now();
+                    player_.tick();
+                    account(Profile::kPlayer, now() - tp);
+                }
+                const uint32_t ext = extTick16Req_.load(std::memory_order_acquire);
+                toTick16_ += ext ? ext : player_.samplesPerTick16(fs_);
             }
-            toTick16_ += player_.samplesPerTick16(fs_);
+            midiTick();
         }
         uint32_t n = toTick16_ >> 16;
         if (n > frames - pos) n = frames - pos;
@@ -292,9 +458,9 @@ void Engine::fill(int16_t* out, uint32_t frames) {
         pcm_.render(busL_, busR_, int(frames));
         account(Profile::kPcm, now() - tp);
     }
-    if (applied_.fx && song_->fx.any()) {
+    if (!external_ && applied_.fx && song_->fx.any()) {
         const uint32_t tf = now();
-        fx_.configure(song_->fx, player_.samplesPerTick16(fs_) >> 16);
+        fx_.configure(song_->fx, (player_.samplesPerTick16(fs_) >> 16) * song_->multiSpeed());   // delay in frames
         fx_.process(busL_, busR_, int(frames));
         account(Profile::kEffects, now() - tf);
     }

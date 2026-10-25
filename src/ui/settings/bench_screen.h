@@ -30,6 +30,7 @@ private:
     uint32_t lastPoll_ = 0;
     uint32_t drvMax_ = 0, drvAvg_ = 0;
     uint32_t underruns_ = 0;
+    uint32_t displayFaults_ = 0;
     bool haveDriver_ = false;
 };
 

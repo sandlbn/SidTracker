@@ -25,7 +25,7 @@ constexpr int kRowH = 16;
 constexpr int kHelpY = kRowY + PatternScreen::kRows * kRowH + 8;
 // Character offset of each cursor field inside "C-4 01 A03".
 constexpr int kFieldChar[PatternScreen::kFields] = {0, 4, 5, 7, 8, 9};
-constexpr int kFieldW[PatternScreen::kFields] = {3, 1, 1, 1, 1, 1};
+constexpr int kFieldW[PatternScreen::kFields] = {3, 2, 1, 1, 1, 1};   // the instrument is one field
 constexpr uint8_t kLengths[] = {16, 32, 48, 64, 96, 128};
 
 int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
@@ -35,6 +35,7 @@ int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 Pattern& PatternScreen::pat() { return ui().song().pattern(ui().pattern); }
 Cell& PatternScreen::cell() {
     static Cell dummy;   // the drum column has no Cell
+    if (row_ >= pat().rows) row_ = pat().rows - 1;   // the length may have shrunk (undo)
     return ui().channel < kChannels ? pat().cells[row_][ui().channel] : (dummy = Cell{});
 }
 
@@ -47,6 +48,7 @@ void PatternScreen::moveRow(int d) {
 
 void PatternScreen::moveField(int d) {
     int f = field_ + d, ch = ui().channel;
+    if (f == 2) f += d;   // the instrument is one field (1); 2 is not a stop
     const int fields = ch == kDrumCh ? 1 : kFields;
     if (f < 0) {
         ch = (ch + kTracks - 1) % kTracks;
@@ -120,7 +122,7 @@ void PatternScreen::encoder(int d) {
             break;
         case 1:
         case 2:
-            c.inst = uint8_t(clampi(c.inst + d * (sh || field_ == 1 ? 16 : 1), 0, kInstrumentCount - 1));
+            c.inst = uint8_t(clampi(c.inst + d * (sh ? 16 : 1), 0, kInstrumentCount - 1));
             if (c.inst) ui().inst = c.inst;
             break;
         case 3: c.cmd = uint8_t((c.cmd + d) & 15); break;
@@ -145,7 +147,22 @@ bool PatternScreen::pad(int p, bool down, uint8_t vel) {
         }
         return true;
     }
-    if (field_ != 0 && ui().edit && p < 16) {
+    if (field_ == 1 || field_ == 2) {
+        // The instrument column, as on the stock Tracker: pad 1-48 is
+        // instrument 1-48. In edit mode it is written into the step (an
+        // empty step also gets a note) and the cursor moves on; otherwise
+        // the pad just chooses it. Either way it plays and becomes current.
+        if (p >= 48) return true;
+        const uint8_t slot = uint8_t(p + 1);
+        ui().inst = slot;
+        ui().auditionNote(p, slot, uint8_t(1 + (ui().octave + 1) * 12));
+        if (ui().edit) {
+            writeInstrument(slot);
+            advance();
+        }
+        return true;
+    }
+    if (field_ >= 3 && ui().edit && p < 16) {
         enterHex(p);
         return true;
     }
@@ -159,6 +176,45 @@ bool PatternScreen::pad(int p, bool down, uint8_t vel) {
         advance();
         edited();
     }
+    return true;
+}
+
+bool PatternScreen::hexPads() const { return ui().edit && field_ >= 3 && ui().channel != kDrumCh; }
+
+bool PatternScreen::padColour(int p, uint32_t& rgb) {
+    if ((field_ == 1 || field_ == 2) && ui().channel != kDrumCh) {
+        // Instrument column: the pads are instruments 1-48; the step's one is lit.
+        const uint8_t shown = cell().inst ? cell().inst : ui().inst;
+        if (p + 1 == shown) {
+            rgb = 0x00C060;
+            return true;
+        }
+        rgb = p < 48 ? 0x081810 : 0;
+        return true;
+    }
+    if (!hexPads() || p >= 16) return false;
+    rgb = 0x701010;   // hex keys (UX plan P1.5)
+    return true;
+}
+
+void PatternScreen::writeInstrument(uint8_t inst) {
+    // The instrument picker / an instrument pad: "instruments are always
+    // added with a note" (stock manual): an empty step also gets one.
+    if (ui().channel == kDrumCh) return;
+    Cell& c = cell();
+    c.inst = inst;
+    if (!c.note) c.note = uint8_t(1 + (ui().octave + 1) * 12);
+    edited();
+}
+
+bool PatternScreen::midiNote(uint8_t n) {
+    // In edit mode on a note field of a SID track: write it, as a pad would.
+    if (!ui().edit || field_ != 0 || ui().channel == kDrumCh) return false;
+    Cell& c = cell();
+    c.note = n;
+    c.inst = ui().inst;
+    advance();
+    edited();
     return true;
 }
 
@@ -214,7 +270,7 @@ bool PatternScreen::button(uint8_t id, bool down) {
             } else {
                 Cell& c = cell();
                 if (field_ == 0) c.note = c.inst = 0;
-                else if (field_ <= 2) c.inst = 0;
+                else if (field_ <= 2) c = Cell{};   // the instrument column clears the step (stock)
                 else c.cmd = c.param = 0;
                 advance();
             }
@@ -238,11 +294,11 @@ bool PatternScreen::button(uint8_t id, bool down) {
                     if (!clipDrumRows_) return true;
                     for (int r = 0; r < clipDrumRows_ && r < p.rows; ++r) p.drum[r] = clipDrum_[r];
                     edited();
-                    u.message("Drums pasted");
+                    u.status("Drums pasted");
                 } else {
                     clipDrumRows_ = p.rows;
                     std::memcpy(clipDrum_, p.drum, sizeof clipDrum_);
-                    u.message("Drums copied");
+                    u.status("Drums copied");
                 }
                 return true;
             }
@@ -250,17 +306,34 @@ bool PatternScreen::button(uint8_t id, bool down) {
                 if (!clipRows_) return true;
                 for (int r = 0; r < clipRows_ && r < p.rows; ++r) p.cells[r][u.channel] = clip_[r];
                 edited();
-                u.message("Track pasted");
+                u.status("Track pasted");
             } else {
                 clipRows_ = p.rows;
                 for (int r = 0; r < p.rows; ++r) clip_[r] = p.cells[r][u.channel];
-                u.message("Track copied");
+                u.status("Track copied");
             }
             return true;
         case b::EncPush:
             follow_ = !follow_;
-            u.message(follow_ ? "Follow playback on" : "Follow playback off");
+            u.status(follow_ ? "Follow playback on" : "Follow playback off");
             return true;
+        case b::F1:
+        case b::F2:
+        case b::F3:
+        case b::F4:
+        case b::F5:
+        case b::F6:
+        case b::F7:
+            if (sh) {   // Shift: the mute page (tracks 1-6, F7 drums), as on the stock Tracker
+                Engine& e = u.app().engine;
+                const int ch = id - b::F1;
+                e.setMuted(ch, !e.muted(ch));
+                return true;
+            }
+            break;
+        default: break;
+    }
+    switch (id) {
         case b::F1: u.pattern = uint8_t((u.pattern + kPatternCount - 1) % kPatternCount); return true;
         case b::F2: u.pattern = uint8_t((u.pattern + 1) % kPatternCount); return true;
         case b::F3: if (u.octave > 0) --u.octave; return true;
@@ -270,7 +343,7 @@ bool PatternScreen::button(uint8_t id, bool down) {
         case b::F7: u.step = uint8_t((u.step + 1) % 9); return true;
         case b::F8: {
             if (!u.edit) {
-                u.message("Length: Rec first");
+                u.status("Length: Rec first");
                 return true;
             }
             int i = 0;
@@ -288,6 +361,17 @@ void PatternScreen::labels(const char* out[8]) {
     static char step[12], len[12];
     std::snprintf(step, sizeof step, "STEP %u", unsigned(ui().step));
     std::snprintf(len, sizeof len, "LEN %u", unsigned(pat().rows));
+    if (ui().shift) {   // the mute page
+        static char m[7][10];
+        const Engine& e = ui().app().engine;
+        for (int i = 0; i < 7; ++i) {
+            if (i < 6) std::snprintf(m[i], sizeof m[i], "%s %d", e.muted(i) ? "UNMUTE" : "MUTE", i + 1);
+            else std::snprintf(m[i], sizeof m[i], "%s", e.muted(i) ? "UNMUTE DR" : "MUTE DR");
+            out[i] = m[i];
+        }
+        out[7] = len;
+        return;
+    }
     out[0] = "PAT -";
     out[1] = "PAT +";
     out[2] = "OCT -";
@@ -312,7 +396,7 @@ void PatternScreen::draw(ot::Gfx& g) {
     char buf[96];
 
     // Header: pattern, length, octave, instrument, step, edit state.
-    std::snprintf(buf, sizeof buf, "PAT %02X  LEN %02X  OCT %u  STEP %u", unsigned(u.pattern), unsigned(p.rows),
+    std::snprintf(buf, sizeof buf, "PAT %02X  LEN %u  OCT %u  STEP %u", unsigned(u.pattern), unsigned(p.rows),
                   unsigned(u.octave), unsigned(u.step));
     g.text(8, kHeadY, kMono, col::kText, buf);
     std::snprintf(buf, sizeof buf, "INS %02X %s", unsigned(u.inst), s.inst[u.inst].name);
@@ -340,13 +424,24 @@ void PatternScreen::draw(ot::Gfx& g) {
 
     // Rows around the cursor: backgrounds, then one glyph layer per colour,
     // tracks outermost so the x >= 512 translate switches once per layer.
-    int top = row_ - kRows / 2;
-    top = clampi(top, 0, p.rows > kRows ? p.rows - kRows : 0);
+    // Editing: the cursor stays in the middle. Following playback: the view
+    // stands still and turns a page when the play row reaches the bottom
+    // (UX plan P2.3d), instead of scrolling the whole grid every row.
+    const bool paging = pl.playing() && follow_ && !u.edit;
+    const int maxTop = p.rows > kRows ? p.rows - kRows : 0;
+    int top;
+    if (paging) {
+        if (row_ < viewTop_ || row_ >= viewTop_ + kRows) viewTop_ = row_;
+        top = clampi(viewTop_, 0, maxTop);
+    } else {
+        top = clampi(row_ - kRows / 2, 0, maxTop);
+        viewTop_ = top;
+    }
     const int shown = p.rows - top < kRows ? p.rows - top : kRows;
     for (int i = 0; i < shown; ++i) {
         const int r = top + i;
         const int y = kRowY + i * kRowH;
-        if (r == row_) g.fill(0, y, 800, kRowH, col::kPanelHi);
+        if (r == row_) g.fill(0, y, 800, kRowH, paging ? col::kPlayRow : col::kPanelHi);
         else if (here && r == pl.row()) g.fill(0, y, 800, kRowH, col::kPlayRow);
         else if (r % 4 == 0) g.fill(0, y, 800, kRowH, col::kRowHi);
     }
@@ -357,7 +452,8 @@ void PatternScreen::draw(ot::Gfx& g) {
         if (layer == kDimL || layer == kRowNumL) {
             for (int i = 0; i < shown; ++i) {
                 const int r = top + i;
-                if ((r % 4 == 0) != (layer == kRowNumL)) continue;
+                const bool bright = r % 4 == 0 || r == row_;   // the cursor / play row too (on its highlight)
+                if (bright != (layer == kRowNumL)) continue;
                 hex2(buf, uint8_t(r));
                 buf[2] = 0;
                 gl.put(2, kRowY + i * kRowH, buf);
@@ -429,12 +525,14 @@ void PatternScreen::draw(ot::Gfx& g) {
     } else if (field_ == 0) {
         std::snprintf(buf, sizeof buf, "NOTE  pads / jog: note   Fx2: key off ===   Shift+Delete: delete row");
     } else if (field_ <= 2) {
-        std::snprintf(buf, sizeof buf, "INSTRUMENT %02X  %s", unsigned(c.inst), c.inst ? s.inst[c.inst].name : "");
+        std::snprintf(buf, sizeof buf, "INSTRUMENT %02X %.16s   pads 1-48: instrument   hold Instr: all", unsigned(c.inst),
+                      c.inst ? s.inst[c.inst].name : "-");
     } else {
         std::snprintf(buf, sizeof buf, "CMD %X%02X  %s  (%s)", unsigned(c.cmd), unsigned(c.param), cmd::name(c.cmd),
                       cmd::paramHelp(c.cmd));
     }
     g.text(8, kHelpY, kMono, col::kDim, buf);
+    if (hexPads()) g.text(596, kHelpY, kMono, col::kEdit, "HEX PADS");
     if (s.extendedFeatures()) g.text(680, kHelpY, kMono, col::kWarn, "EXT: no GT");
 }
 

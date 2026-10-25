@@ -6,7 +6,7 @@
 #   make check      -> host tests + simulator smoke run + device image
 #   make bench / bench-m4 -> engine benchmark on the host / under QEMU (Cortex-M4)
 #   make release    -> build/release/SIDTracker-<ver>.zip (firmware + example songs)
-VERSION   ?= 0.6.4
+VERSION   ?= 0.9.1
 BUILD     := build
 DIAG_N    ?= 1
 VERNUM    := $(subst .,,$(VERSION))
@@ -116,9 +116,16 @@ demo:
 # Original example songs (tools/demo/make_examples.cpp) -> build/examples/
 examples:
 	@mkdir -p build/examples
-	$(HOSTCXX) -std=c++17 -O2 -Isrc -Isrc/platform -Isrc/platform/core tools/demo/make_examples.cpp \
+	$(HOSTCXX) -std=c++17 -O2 -Isrc -Isrc/platform -Isrc/platform/core -Itools/demo tools/demo/make_examples.cpp \
 	    $(wildcard src/tracker/*/*.cpp) -o build/make_examples
 	build/make_examples build/examples
+
+# Stock instrument library (tools/demo/make_instruments.cpp) -> build/instruments/
+instruments:
+	rm -rf build/instruments
+	$(HOSTCXX) -std=c++17 -O2 -Isrc -Isrc/platform -Isrc/platform/core tools/demo/make_instruments.cpp \
+	    $(wildcard src/tracker/*/*.cpp) $(wildcard src/compatibility/goat/*.cpp) -o build/make_instruments
+	build/make_instruments build/instruments
 
 # Blast Grid 64 songs from the game's sources (docs/blastgrid-import.md).
 GAME ?= $(HOME)/Projects/BlastGridC64
@@ -132,7 +139,7 @@ blastgrid: build/tools/text2sidt
 	for f in build/blastgrid/txt/*.txt; do build/tools/text2sidt $$f build/blastgrid/sidt/$$(basename $$f .txt).sidt; done
 
 # Release zip (tools/release): firmware + example songs and their .sid files.
-release: all demo examples
+release: all demo examples instruments
 	$(MAKE) -C tests oracle
 	tools/release/make_release.sh $(VERSION) $(PTF_NAME)
 
@@ -140,5 +147,14 @@ clean:
 	rm -rf build
 
 -include $(OBJS:.o=.d)
-.PHONY: all clean host-test sim bench bench-m4 check demo examples blastgrid release sidplayer sidplayer-check
+# README screenshots from the simulator (sim/scripts/readme_shots.txt).
+screenshots: examples
+	$(MAKE) -C sim
+	rm -rf build/shots-sd && mkdir -p build/shots-sd/SIDTracker/Projects
+	cp build/examples/*.sidt build/shots-sd/SIDTracker/Projects/
+	cp build/examples/PCMGROOVE.sidt build/shots-sd/SIDTracker/autosave.sidt
+	cd sim && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy ../build/sim/sidtracker-sim --sd ../build/shots-sd \
+	    --script scripts/readme_shots.txt
+
+.PHONY: instruments screenshots all clean host-test sim bench bench-m4 check demo examples blastgrid release sidplayer sidplayer-check
 HOSTCXX ?= g++

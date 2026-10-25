@@ -290,3 +290,31 @@ TEST(osc3_and_env3_readback) {
     CHECK_EQ(c.read(kEnv3), 0xFF);
     CHECK_EQ(c.read(kOsc3), uint8_t(c.lastWave(2) >> 4));
 }
+
+TEST(voice_gain_scales_one_voice) {
+    // UX plan P0.3: the Master mixer's per-track level.
+    auto render = [](float gain) {
+        Chip c;
+        c.init(Model::k8580, kPalClockHz, kFs);
+        c.write(0x18, 0x0F);
+        for (int v = 0; v < 2; ++v) {
+            c.write(uint8_t(v * 7 + 1), uint8_t(0x10 + v * 8));
+            c.write(uint8_t(v * 7 + 5), 0x00);
+            c.write(uint8_t(v * 7 + 6), 0xF0);
+            c.write(uint8_t(v * 7 + 4), 0x21);
+        }
+        c.setVoiceGain(1, gain);
+        static float out[4410];
+        double e = 0;
+        for (int k = 0; k < 10; ++k) {
+            c.renderVoices(441);
+            c.renderFilter(441, out);
+            for (int i = 0; i < 441; ++i) e += double(out[i]) * out[i];
+        }
+        return e;
+    };
+    const double full = render(1.0f), half = render(0.5f), none = render(0.0f);
+    CHECK(none > 0.0);           // voice 1 still plays
+    CHECK(half < full);
+    CHECK(half > none);
+}

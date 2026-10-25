@@ -26,6 +26,7 @@ void BenchScreen::poll(uint32_t now) {
         if (d.blocks) drvAvg_ = d.avgC;
         if (d.maxC > drvMax_) drvMax_ = d.maxC;
         underruns_ = d.underruns;
+        displayFaults_ = d.displayFaults;
     }
 }
 
@@ -42,7 +43,7 @@ bool BenchScreen::button(uint8_t id, bool down) {
     Engine& e = ui().app().engine;
     if (id == b::F1) {
         e.setStress(!e.stress());
-        ui().message(e.stress() ? "Stress load on (player paused)" : "Stress load off");
+        ui().status(e.stress() ? "Stress load on (player paused)" : "Stress load off");
         return true;
     }
     if (id == b::F2) {
@@ -95,6 +96,8 @@ void BenchScreen::draw(ot::Gfx& g) {
     if (haveDriver_) {
         std::snprintf(buf, sizeof buf, "%u", unsigned(underruns_));
         line("Audio underruns:", buf, underruns_ ? col::kBad : col::kGood);
+        std::snprintf(buf, sizeof buf, "%u (each one a lost frame: report which screen)", unsigned(displayFaults_));
+        line("Display faults:", buf, displayFaults_ ? col::kBad : col::kGood);
         std::snprintf(buf, sizeof buf, "%u avg, %u peak cycles (whole ISR callback)", unsigned(drvAvg_), unsigned(drvMax_));
         line("Driver callback:", buf);
     } else {

@@ -57,9 +57,21 @@ Design decode(const Song& s, int slot);
 bool isDesigned(const Song& s, int slot);
 
 enum class Result : uint8_t { kOk, kTableFull };
+// Sections of a design: apply() writes only those in its mask, so changing
+// the envelope never touches the tables (a GoatTracker instrument keeps its
+// programs) and changing the pulse leaves the wave program alone.
+enum Section : uint8_t {
+    kEnv = 1 << 0,      // AD / SR
+    kHr = 1 << 1,       // gate timer hard-restart bit
+    kWaveProg = 1 << 2, // wave + transient: wave program, first wave
+    kPulseProg = 1 << 3,
+    kFilterProg = 1 << 4,
+    kVib = 1 << 5,
+    kAll = 0x3F,
+};
 // Writes the design into instrument `slot`; `voice` (0..2) is the SID voice
 // the filter routes. A full table leaves the song unchanged.
-Result apply(Song& s, int slot, const Design& d, int voice);
+Result apply(Song& s, int slot, const Design& d, int voice, uint8_t sections = kAll);
 
 }  // namespace designer
 }  // namespace sidt

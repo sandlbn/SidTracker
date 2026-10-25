@@ -31,6 +31,10 @@ public:
     void labels(const char* out[8]) override;
     bool button(uint8_t id, bool down) override;
     bool pad(int p, bool down, uint8_t vel) override;
+    bool midiNote(uint8_t noteValue) override;
+    bool padColour(int p, uint32_t& rgb) override;
+    bool hexPads() const;   // edit mode on an instrument / command field: pads 1-16 type hex
+    void writeInstrument(uint8_t inst);   // the picker's Insert (edit mode)
     void encoder(int delta) override;
     bool animated() const override { return true; }
 
@@ -48,6 +52,8 @@ private:
     void setDrum(uint8_t slot);
 
     int row_ = 0;
+
+    int viewTop_ = 0;   // first row shown while following playback
     int field_ = 0;
     bool follow_ = true;
     Cell clip_[kMaxRows] = {};

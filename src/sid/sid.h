@@ -44,6 +44,8 @@ public:
     // Muted voices keep running (they still sync / ring-modulate others) but
     // contribute nothing to the mix (Perform mute/solo, PLAN.md §10).
     void setVoiceMuted(int v, bool muted) { if (v >= 0 && v < kVoices) muted_[v] = muted; }
+    // Per-voice level 0..1 (Master mixer), applied before the filter.
+    void setVoiceGain(int v, float g) { if (v >= 0 && v < kVoices) gain_[v] = g; }
     bool voiceMuted(int v) const { return v >= 0 && v < kVoices && muted_[v]; }
     // Per-voice stereo (M8): a panned voice leaves the chip's mono direct
     // path for pannedL/R (gains gl, gr); filtered voices stay with the chip.
@@ -93,6 +95,7 @@ private:
     uint32_t clockFrac_ = 0;
     uint8_t regs_[kRegCount] = {};
     bool muted_[kVoices] = {};
+    float gain_[kVoices] = {1.0f, 1.0f, 1.0f};
     uint16_t lastWave_[kVoices] = {};
     float volume_ = 0.0f;                // MODE/VOL volume / 15
     bool panOn_[kVoices] = {};

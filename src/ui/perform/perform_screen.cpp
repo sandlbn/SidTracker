@@ -68,6 +68,7 @@ void PerformScreen::change(int row, int ctl, int d, bool toggle) {
         const int w = toggle ? 50 : clampi(ui().song().sid.balance + d * 5, 0, 100);
         ui().song().sid.balance = uint8_t(w);
         e.setBalance(uint8_t(w));
+        ui().app().markDirty();   // song data (not a recorded lane)
     }
     record(laneOf(row, ctl));
 }
@@ -86,16 +87,12 @@ bool PerformScreen::button(uint8_t id, bool down) {
         case b::EncPush: change(row_, ctl_, 0, true); return true;
         case b::F2: {
             if (row_ >= 8) return true;
-            if (!confirmClear_) {
-                confirmClear_ = true;
-                ui().message("Press CLR AUTO again", 3000);
-                return true;
-            }
-            confirmClear_ = false;
+            if (!ui().confirming(b::F2)) clearPattern_ = currentPattern();   // the pattern asked about
+            if (!ui().confirm(this, b::F2, "Clear this row's automation in this pattern?", "CLEAR")) return true;
             const int a = laneOf(row_, row_ < 6 ? 2 : 0), c = laneOf(row_, row_ < 6 ? 3 : 1);
-            ui().song().pattern(currentPattern()).clearAuto(uint16_t((1u << a) | (1u << c)));
+            ui().song().pattern(clearPattern_).clearAuto(uint16_t((1u << a) | (1u << c)));
             ui().app().markDirty();
-            ui().message("Automation cleared");
+            ui().status("Automation cleared");
             return true;
         }
         case b::F1: {
@@ -105,7 +102,7 @@ bool PerformScreen::button(uint8_t id, bool down) {
                 e.setMuted(ch, false);
                 e.setSolo(ch, false);
             }
-            ui().message("Overrides cleared");
+            ui().status("Overrides cleared");
             return true;
         }
         default: return false;
@@ -139,7 +136,7 @@ bool PerformScreen::padColour(int p, uint32_t& rgb) {
 
 void PerformScreen::labels(const char* out[8]) {
     out[0] = "CLEAR";
-    out[1] = confirmClear_ ? "CLR AUTO?" : "CLR AUTO";
+    out[1] = "CLR AUTO";
 }
 
 void PerformScreen::drawVoice(ot::Gfx& g, int ch, int x, int y) {

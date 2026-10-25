@@ -42,9 +42,9 @@ private:
     void drawVoice(ot::Gfx& g, int ch, int x, int y);
 
     int row_ = 0, ctl_ = 0;
+    int clearPattern_ = 0;   // CLR AUTO: the pattern playing when it was asked
     uint32_t touched_[kAutoLanes] = {};    // last change (ms) per lane, 0 = idle
     int lastPos_[kAutoLanes] = {};         // pattern * 256 + row last recorded
-    bool confirmClear_ = false;
 };
 
 }  // namespace ui

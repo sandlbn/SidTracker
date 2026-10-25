@@ -9,6 +9,7 @@
 #include "audio_sgtl5000.h"
 #include "board.h"
 #include "diag.h"
+#include "ft81x.h"
 #include "fw_update.h"
 #include "hal.h"
 #include "input.h"
@@ -30,7 +31,10 @@ constexpr uint32_t kFxFrames = 88200;
 constexpr uint32_t kFxOffset = (kScratchOffset + kScratchBytes + 4095u) & ~4095u;
 constexpr uint32_t kKitOffset = (kFxOffset + kFxFrames * 4u + 4095u) & ~4095u;
 constexpr uint32_t kKitSamples = 4u * 1024u * 1024u;
-static_assert(kKitOffset + kKitSamples * 2u <= board::kSdramSize, "SDRAM layout exceeds 16 MB");
+constexpr uint32_t kC64Offset = (kKitOffset + kKitSamples * 2u + 4095u) & ~4095u;   // SID player
+constexpr uint32_t kUndoOffset = (kC64Offset + sidt::App::kC64MemoryBytes + 4095u) & ~4095u;   // undo history
+constexpr uint32_t kListOffset = (kUndoOffset + sidt::Undo::kBytes + 4095u) & ~4095u;   // instrument library list
+static_assert(kListOffset + sidt::App::kInstListBytes <= board::kSdramSize, "SDRAM layout exceeds 16 MB");
 
 sidt::App gApp;
 
@@ -40,6 +44,7 @@ bool driverStats(sidt::DriverStats& d) {
     hal::Sgtl5000Audio& a = hal::audio();
     d.blocks = a.renderCyclesWindow(d.minC, d.avgC, d.maxC);
     d.underruns = a.underruns();
+    d.displayFaults = hal::display().faults();
     return true;
 }
 
@@ -85,6 +90,12 @@ extern "C" int main(void) {
         p.fxFrames = kFxFrames;
         p.kitMemory = reinterpret_cast<int16_t*>(board::kSdramBase + kKitOffset);
         p.kitSamples = kKitSamples;
+        p.c64Memory = reinterpret_cast<uint8_t*>(board::kSdramBase + kC64Offset);
+        p.undoMemory = reinterpret_cast<uint8_t*>(board::kSdramBase + kUndoOffset);
+        p.undoBytes = sidt::Undo::kBytes;
+        p.listMemory = reinterpret_cast<uint8_t*>(board::kSdramBase + kListOffset);
+        p.listBytes = sidt::App::kInstListBytes;
+        p.midi = h.midi;
         p.name = "K66 180 MHz";
         p.cycleCounter = &dwtCycles;
         p.driverStats = &driverStats;

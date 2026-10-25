@@ -46,11 +46,21 @@ public:
 
 class InstrumentScreen final : public Screen {
 public:
+    // GENERAL page rows.
+    enum GenRow { kGenName, kGenAttack, kGenDecay, kGenSustain, kGenRelease, kGenHr, kGenWave, kGenVib,
+                  kGenVibDelay, kGenRows };
+    // The song changed under the screen (undo / redo): drop cached reads.
+    void forget() {
+        designSlot_ = -1;
+        usersKind_ = -1;
+        browsing_ = false;   // the snapshot no longer matches the song
+    }
     enum Page : uint8_t { kGeneral, kDesign, kWave, kPulse, kFilter, kTables, kSounds, kPages };
 
     const char* title() const override { return "INSTRUMENT"; }
     void draw(ot::Gfx& g) override;
     void labels(const char* out[8]) override;
+    bool padColour(int p, uint32_t& rgb) override;
     bool button(uint8_t id, bool down) override;
     bool pad(int p, bool down, uint8_t vel) override;
     void encoder(int delta) override;
@@ -72,6 +82,11 @@ private:
     bool soundsButton(uint8_t id);
     void soundsEncoder(int d);
     int presetIndex() const { return library::categoryFirst(category_) + preset_; }
+    // SOUNDS: the categories are the built-in ones, then CARD (the .ins
+    // files in /SIDTracker/Instruments, UX plan P3.2).
+    bool card() const { return category_ == library::kCategories; }
+    int categoryTotal() const;
+    bool loadSelected();   // the selected preset or card file into the slot
 
     Page page_ = kGeneral;
     int sel_ = 0;
@@ -81,8 +96,16 @@ private:
     // SOUNDS page.
     int sndRow_ = 0;                 // 0 category, 1 preset, 2..5 arp fields
     int category_ = 0, preset_ = 0;
+    bool browsing_ = false;
+    char saveName_[kNameLen + 1] = {};   // GENERAL SAVE: the typed name
+    uint8_t browseSlot_ = 0;         // the slot the snapshot was taken from
+    int usersKind_ = -1, usersRow_ = 0;   // users_ is for this table row
+    char users_[64] = {};          // a preset is being tried (F7 CANCEL / F8 KEEP)
+    void browseLoad();
+    void randomise(bool fresh);      // DESIGN Insert / Shift+Insert (UX plan P3.3)
+    designer::Design tryBase_;       // the sound variations start from
+    bool pageAction(int k);          // F1..F6 on the current page
     library::Arp arp_;
-    bool loadPending_ = false;       // second push overwrites a used instrument
     // DESIGN page.
     designer::Design design_;
     int designSlot_ = -1;            // instrument design_ was read from

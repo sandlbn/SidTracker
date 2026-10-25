@@ -41,6 +41,9 @@ public:
     virtual bool button(uint8_t id, bool down) { (void)id; (void)down; return false; }
     // Pads: return true when consumed (else they audition notes).
     virtual bool pad(int p, bool down, uint8_t vel) { (void)p; (void)down; (void)vel; return false; }
+    // A MIDI note (value 1..96 = C-0..B-7) arrived; it is auditioned anyway.
+    // True when the screen used it (e.g. entered it into the pattern).
+    virtual bool midiNote(uint8_t noteValue) { (void)noteValue; return false; }
     virtual void encoder(int delta) { (void)delta; }
     // Pad LED colours (0x00RRGGBB) for the screen; false = default keyboard.
     virtual bool padColour(int p, uint32_t& rgb) { (void)p; (void)rgb; return false; }
@@ -50,7 +53,7 @@ public:
     void attach(Ui& ui) { ui_ = &ui; }
 
 protected:
-    Ui& ui() { return *ui_; }
+    Ui& ui() const { return *ui_; }
     Ui* ui_ = nullptr;
 };
 

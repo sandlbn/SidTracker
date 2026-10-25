@@ -194,8 +194,16 @@ bool importSong(const Song& gt, int sub, sidt::Song& out, Report& rep) {
     out.sid.clock = SidClock::kPal;
     out.sid.balance = 0;
     for (int i = 1; i < kInstrumentCount; ++i) {
-        if (i <= gt.instruments) instrumentFromGt(gt.inst[i], out.inst[i], i);
-        else out.inst[i].clear(i);
+        if (i <= gt.instruments) {
+            instrumentFromGt(gt.inst[i], out.inst[i], i);
+        } else {
+            // GoatTracker plays a slot above the stored count as a zero
+            // (silent) instrument: keep that, not the audible init patch.
+            out.inst[i].clear(i);
+            out.inst[i].ad = sidt::Instrument::kLegacyAd;
+            out.inst[i].sr = sidt::Instrument::kLegacySr;
+            out.inst[i].firstWave = sidt::Instrument::kLegacyWave;
+        }
     }
     for (int k = 0; k < kTableKinds; ++k) {
         out.tables[k] = sidt::Table{};

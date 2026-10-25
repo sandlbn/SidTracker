@@ -79,8 +79,11 @@ public:
 
     // One tracker tick.
     void tick();
+    // Forgets what was written to `chip`: the next tick writes every one of
+    // its registers again (the chip was reset or used for something else).
+    void rewriteChip(int chip);
     // Audio samples per tick for the song tempo at `sampleRateMilliHz`,
-    // 16.16 fixed point (bpm * 2 / 5 ticks per second).
+    // 16.16 fixed point (bpm * 2 / 5 * multi ticks per second).
     uint32_t samplesPerTick16(uint32_t sampleRateMilliHz) const;
 
     // Playback position (read by the UI; single words, torn reads harmless).

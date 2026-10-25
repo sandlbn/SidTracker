@@ -20,8 +20,20 @@ public:
     bool animated() const override { return true; }
 
 private:
+    // Page 0: the mixer (F1-F6 tracks, F7 drums, F8 master: hold + jog =
+    // level, tap = mute, Shift + tap = solo, Delete = default). Page 1 (the
+    // Master key again): balance, effects, meters per chip, CPU.
     enum Row { kVolume, kBalance, kDrums, kFx, kDelay, kChorus, kReverb, kRows };
-    int sel_ = 0;
+    enum Strip { kTrack1 = 0, kDrumStrip = 6, kMasterStrip = 7, kStrips = 8 };
+    void drawMixer(ot::Gfx& g);
+    void drawSettings(ot::Gfx& g);
+    void changeLevel(int strip, int delta);
+    int page_ = 0;
+    int sel_ = 0;          // page 1 row
+    int strip_ = 0;        // page 0 selected strip
+    int heldF_ = -1;       // F-key held on page 0
+    bool jogged_ = false;  // the held F-key turned a level (no mute on release)
+    float stripLevel_[kStrips] = {};
     float level_[4] = {};   // displayed meters (peak hold with decay)
     bool clip_ = false;
     uint32_t clipUntil_ = 0;

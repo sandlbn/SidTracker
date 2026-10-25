@@ -124,6 +124,11 @@ private:
     void flush();
     bool waitIdle();
     void recoverCoprocessor();
+
+public:
+    uint32_t faults() const { return faults_; }   // SIDTracker local change 5
+
+private:
     void hostCommand(uint8_t c, uint8_t p);
     bool powerUp(uint8_t clockCmd);    // spec 01 §4.2 steps 2-4
     bool snapshotBand(int band);

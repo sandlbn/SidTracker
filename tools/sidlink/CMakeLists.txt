@@ -1,0 +1,15 @@
+# SIDLink -- Pico 2 (RP2350) USB-host bridge: SIDTracker (USB-MIDI device)
+# -> ASID / MIDI -> USBSID-Pico (real SID chips), both behind a USB hub on
+# the Pico's own USB port. MIT, SIDTracker. Build: see README.md.
+cmake_minimum_required(VERSION 3.13)
+set(PICO_BOARD pico2 CACHE STRING "board")
+include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
+project(sidlink C CXX ASM)
+set(CMAKE_C_STANDARD 11)
+pico_sdk_init()
+add_executable(sidlink main.c)
+target_include_directories(sidlink PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+target_link_libraries(sidlink PRIVATE pico_stdlib tinyusb_host)
+pico_enable_stdio_usb(sidlink 0)
+pico_enable_stdio_uart(sidlink 1)
+pico_add_extra_outputs(sidlink)

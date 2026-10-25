@@ -105,6 +105,7 @@ Result save(const Song& s, Writer& w) {
     b.u8(s.hrSR);
     b.u8(uint8_t(s.mode));
     b.u8(s.restartPos);
+    b.u8(s.multiSpeed());
     if (!b.flush(w, "META")) return Result::kIoError;
 
     b.u8(uint8_t(s.sid.model[0]));
@@ -139,11 +140,23 @@ Result save(const Song& s, Writer& w) {
         if (!b.flush(w, "PATT")) return Result::kIoError;
     }
 
+    // Slots without an INST record are init patches (0.8 on; older files
+    // left silent slots out).
+    if (!b.flush(w, "IDEF")) return Result::kIoError;
+    // Slots a pattern plays are always written, so firmware before 0.8 (no
+    // IDEF rule) plays them the same.
+    bool played[kInstrumentCount] = {};
+    for (int p = 0; p < kPatternCount; ++p) {
+        const Pattern& pt = s.pattern(p);
+        for (int r = 0; r < pt.rows; ++r)
+            for (const Cell& c : pt.cells[r])
+                if (c.inst < kInstrumentCount) played[c.inst] = true;
+    }
     for (int i = 1; i < kInstrumentCount; ++i) {
         const Instrument& in = s.inst[i];
         Instrument def;
         def.clear(i);
-        if (in.empty() && std::strcmp(in.name, def.name) == 0) continue;
+        if (!played[i] && in.empty() && std::strcmp(in.name, def.name) == 0) continue;
         b.u8(uint8_t(i));
         b.u8(kInstFields);
         b.u8(in.ad);
@@ -219,6 +232,10 @@ Result save(const Song& s, Writer& w) {
         if (!b.flush(w, "EXTN")) return Result::kIoError;
     }
 
+    if (s.mix.any()) {   // 0.8 on; older readers skip it
+        for (uint8_t v : s.mix.volume) b.u8(v);
+        if (!b.flush(w, "MIXR")) return Result::kIoError;
+    }
     return b.flush(w, "END ") ? Result::kOk : Result::kIoError;
 }
 
@@ -230,6 +247,8 @@ Result load(Song& s, Reader& r) {
     if (version > kFormatVersion) return Result::kNewerVersion;
     s.clear();
     // The default song's instrument 1 and tables are not part of a file.
+    bool loaded[kInstrumentCount] = {};
+    bool initDefaults = false;
     s.inst[1].clear(1);
     for (Table& t : s.tables) t = Table{};
     static uint8_t payload[8192];
@@ -259,6 +278,8 @@ Result load(Song& s, Reader& r) {
             s.hrSR = c.u8();
             s.mode = c.u8() ? SongMode::kExtended : SongMode::kAuthentic;
             s.restartPos = c.u8();
+            s.multi = c.left() ? c.u8() : 1;   // added in 0.8
+            if (s.multi < 1 || s.multi > Song::kMaxMulti) s.multi = 1;
             if (s.bpm < 16) s.bpm = 125;
             if (!s.speed) s.speed = 6;
         } else if (std::memcmp(h, "SIDC", 4) == 0) {
@@ -290,6 +311,13 @@ Result load(Song& s, Reader& r) {
                     cell.param = c.u8();
                 }
             if (c.left()) p.starts = uint8_t(c.u8() & 0x3F);
+        } else if (std::memcmp(h, "MIXR", 4) == 0) {
+            for (uint8_t& v : s.mix.volume) {
+                const uint8_t x = c.left() ? c.u8() : 100;
+                v = x > 100 ? 100 : x;
+            }
+        } else if (std::memcmp(h, "IDEF", 4) == 0) {
+            initDefaults = true;
         } else if (std::memcmp(h, "INST", 4) == 0) {
             const uint8_t idx = c.u8();
             const uint8_t fields = c.u8();
@@ -298,7 +326,9 @@ Result load(Song& s, Reader& r) {
             in.clear(idx);
             uint8_t v[kInstFields];
             Instrument def;
-            const uint8_t defs[kInstFields] = {def.ad, def.sr, def.firstWave, 0, 0, 0, 0, 0, def.gateTimer};
+            const uint8_t defs[kInstFields] = {Instrument::kLegacyAd, Instrument::kLegacySr, Instrument::kLegacyWave,
+                                               0, 0, 0, 0, 0, def.gateTimer};
+            loaded[idx] = true;
             for (int i = 0; i < kInstFields; ++i) v[i] = i < fields ? c.u8() : defs[i];
             for (int i = kInstFields; i < fields; ++i) c.u8();   // newer fields
             in.ad = v[0];
@@ -375,6 +405,23 @@ Result load(Song& s, Reader& r) {
             for (int i = 0; i < used; ++i) t.right[i] = c.u8();
         }
         if (c.bad()) return Result::kCorrupt;
+    }
+    if (!initDefaults) {
+        // A file from before 0.8: a slot it left out was the silent default.
+        // Where a pattern plays it, keep it silent so the song sounds as it did.
+        bool used[kInstrumentCount] = {};
+        for (int p = 0; p < kPatternCount; ++p) {
+            const Pattern& pat = s.pattern(p);
+            for (int r = 0; r < pat.rows; ++r)
+                for (const Cell& cell : pat.cells[r])
+                    if (cell.inst < kInstrumentCount) used[cell.inst] = true;
+        }
+        for (int i = 1; i < kInstrumentCount; ++i)
+            if (!loaded[i] && used[i]) {
+                s.inst[i].ad = Instrument::kLegacyAd;
+                s.inst[i].sr = Instrument::kLegacySr;
+                s.inst[i].firstWave = Instrument::kLegacyWave;
+            }
     }
     if (s.restartPos >= s.orderLen) s.restartPos = 0;
     return Result::kOk;

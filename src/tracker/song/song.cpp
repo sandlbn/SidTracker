@@ -97,7 +97,14 @@ uint32_t Song::extendedFeatures() const {
     if (fx.any()) f |= kExtEffects;
     if (usesDrums()) f |= kExtDrums;
     if (mod.any()) f |= kExtModulation;
+    if (mix.any()) f |= kExtMixer;
     return f;
+}
+
+bool MixSettings::any() const {
+    for (uint8_t v : volume)
+        if (v != 100) return true;
+    return false;
 }
 
 bool ModSettings::any() const {

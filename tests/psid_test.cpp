@@ -188,3 +188,22 @@ TEST(too_slow_for_a_cia_timer_is_refused) {
     CHECK(psid::exportSid(*b.song, work.data(), uint32_t(work.size()), ok) > 0);
     CHECK_EQ(compare(*b.song, 100, false), 0);
 }
+
+TEST(multispeed_plays_on_a_cia_timer) {
+    Box b;
+    b.song->multi = 4;
+    b.song->speed = 24;
+    b.song->pattern(0).cells[0][0] = {37, 1, 0, 0};
+    b.song->pattern(0).cells[8][4] = {49, 1, 0, 0};
+    std::vector<uint8_t> work(psid::kWorkBytes);
+    const psid::ExportCheck c = psid::checkExport(*b.song, work.data(), uint32_t(work.size()));
+    CHECK(c.ok);
+    CHECK(c.cia);
+    bool noted = false;
+    for (int i = 0; i < c.report.lines; ++i) noted = noted || std::strstr(c.report.line[i], "multispeed x4");
+    CHECK(noted);
+    goat::Report rep;
+    CHECK(psid::exportSid(*b.song, work.data(), uint32_t(work.size()), rep) > 0);
+    CHECK_EQ(work[0x15], 1);   // speed flag: CIA
+    CHECK_EQ(compare(*b.song, 800, true), 0);
+}

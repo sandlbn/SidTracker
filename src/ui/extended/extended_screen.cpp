@@ -80,7 +80,7 @@ bool ExtendedScreen::button(uint8_t id, bool down) {
             return true;
         case b::F8:
             e.setEffects(!e.effects());
-            ui().message(e.effects() ? "Effects on" : "Effects off (all songs)");
+            ui().status(e.effects() ? "Effects on" : "Effects off (all songs)");
             return true;
         case b::Up: sel_ = (sel_ + rows() - 1) % rows(); return true;
         case b::Down: sel_ = (sel_ + 1) % rows(); return true;
@@ -111,7 +111,7 @@ void ExtendedScreen::drawEffects(ot::Gfx& g) {
         listRow(g, 40, kContentY + 34 + i * 28, 520, r.name, v, sel_ == i);
     }
     const bool on = ui().app().engine.effects();
-    g.text(590, kContentY + 34, kMono, on ? col::kGood : col::kWarn, on ? "EFFECTS ON" : "EFFECTS OFF (F8)");
+    g.text(590, kContentY + 34, kMono, on ? col::kGood : col::kWarn, on ? "EFFECTS ON" : "EFFECTS OFF (FX button)");
     g.text(590, kContentY + 56, kMono, col::kDim, "delay -> chorus -> reverb");
     g.text(590, kContentY + 74, kMono, col::kDim, "on SIDs and drums");
 }

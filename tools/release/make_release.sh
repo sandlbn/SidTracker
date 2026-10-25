@@ -12,6 +12,9 @@ rm -rf "$stage" "$here/build/release/$name.zip"
 mkdir -p "$stage/Firmware" "$stage/SIDTracker/Projects" "$stage/SIDTracker/SID"
 cp "$here/build/$image" "$stage/Firmware/"
 cp "$here/build/DUALDEMO.sidt" "$here"/build/examples/*.sidt "$stage/SIDTracker/Projects/"
+# Stock instrument library (SOUNDS > CARD; GoatTracker .ins).
+mkdir -p "$stage/SIDTracker/Instruments"
+cp -r "$here"/build/instruments/* "$stage/SIDTracker/Instruments/"
 # Blast Grid 64 soundtrack (Marcin Spoczynski, examples/blastgrid).
 cp "$here"/examples/blastgrid/BG_*.sidt "$stage/SIDTracker/Projects/"
 for s in "$stage"/SIDTracker/Projects/*.sidt; do
@@ -20,6 +23,7 @@ for s in "$stage"/SIDTracker/Projects/*.sidt; do
 done
 sed -e "s/@VERSION@/$version/g" -e "s/@IMAGE@/$image/g" "$here/tools/release/README.txt" > "$stage/README.txt"
 cp "$here/LICENSE" "$stage/LICENSE.txt"
+cp "$here/docs/MANUAL.md" "$stage/MANUAL.md"
 (cd "$stage" && zip -qr "../$name.zip" .)
 echo "build/release/$name.zip:"
 (cd "$here/build/release" && unzip -l "$name.zip" | tail -n +4 | head -n -2)

@@ -17,6 +17,8 @@
 #include "tracker/playback/player.h"
 #include "test.h"
 #include "tracker/commands/commands.h"
+#include "tracker/song/sound_library.h"
+#include "../tools/demo/classic_instruments.h"
 
 using namespace sidt;
 using Bytes = std::vector<uint8_t>;
@@ -352,4 +354,62 @@ TEST(goattracker_songs_survive_export_when_present) {
     }
     closedir(d);
     std::printf("  %d GoatTracker songs: import -> export -> import plays the same\n", n);
+}
+
+TEST(export_keeps_init_slots_that_patterns_play) {
+    // Fable review 2026-10-22: an untouched (init patch) slot played on a
+    // track was left out of the .sng, so GoatTracker played it silent.
+    Box b;
+    Song& s = *b.s;
+    s.pattern(0).cells[0][0] = {37, 3, 0, 0};
+    std::unique_ptr<goat::Song> gt(new goat::Song);
+    goat::Report rep;
+    CHECK(goat::exportSong(s, *gt, rep));
+    CHECK(gt->instruments >= 3);
+    CHECK_EQ(gt->inst[3].sr, 0xA9);
+}
+
+TEST(import_keeps_slots_above_the_count_silent) {
+    // Fable review 2026-10-22: GoatTracker plays them as zero instruments.
+    Box a, b;
+    a.s->pattern(0).cells[0][0] = {37, 1, 0, 0};
+    std::unique_ptr<goat::Song> gt(new goat::Song);
+    goat::Report rep;
+    CHECK(goat::exportSong(*a.s, *gt, rep));
+    CHECK_EQ(gt->instruments, 1);
+    CHECK(goat::importSong(*gt, 0, *b.s, rep));
+    CHECK_EQ(b.s->inst[2].sr, Instrument::kLegacySr);
+    CHECK_EQ(b.s->inst[2].firstWave, Instrument::kLegacyWave);
+}
+
+TEST(every_preset_survives_the_ins_round_trip) {
+    // UX plan P3.2: the stock library on the card is the presets as .ins
+    // files; loaded from the card they must play exactly like the preset.
+    int bad = 0;
+    const int nClassic = int(sizeof classic::kClassic / sizeof classic::kClassic[0]);
+    for (int i = 0; i < library::presetCount() + nClassic; ++i) {
+        const library::Preset& pre =
+            i < library::presetCount() ? library::preset(i) : classic::kClassic[i - library::presetCount()];
+        Box a, b;
+        for (Box* x : {&a, &b}) {
+            for (Table& t : x->s->tables) t = Table{};
+            x->s->pattern(0).cells[0][0] = {37, 1, 0, 0};
+            x->s->pattern(0).cells[16][0] = {44, 1, 0, 0};
+            x->s->pattern(0).cells[30][0] = {note::kKeyOff, 0, 0, 0};
+        }
+        CHECK(library::load(*a.s, 1, pre, 0) == library::Result::kOk);
+        goat::InsFile ins;
+        CHECK(goat::exportInstrument(*a.s, 1, ins));
+        VecSink sink;
+        CHECK(goat::writeIns(ins, sink));
+        goat::InsFile back;
+        CHECK(goat::readIns({sink.b.data(), uint32_t(sink.b.size())}, back) == goat::Result::kOk);
+        goat::Report rep;
+        CHECK(goat::importInstrument(back, 1, *b.s, rep));
+        if (play(*a.s, 300) != play(*b.s, 300)) {
+            std::printf("  %s plays differently after .ins\n", pre.name);
+            ++bad;
+        }
+    }
+    CHECK_EQ(bad, 0);
 }

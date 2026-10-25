@@ -108,7 +108,7 @@ void Chip::renderVoices(int n) {
             const float w = vc.osc.output(voices_[(v + 2) % kVoices].osc, model_, w12);
             lastWave_[v] = w12;
             if (muted_[v]) continue;
-            const float out = w * float(vc.env.level()) * kEnvScale;
+            const float out = w * float(vc.env.level()) * (kEnvScale * gain_[v]);
             if (route & (1u << v)) f += out;
             else if (v == 2 && v3Off) continue;
             else if (panOn_[v]) {

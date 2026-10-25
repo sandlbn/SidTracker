@@ -13,7 +13,6 @@ namespace ui {
 namespace b = ot::btn;
 
 void FileScreen::enter() {
-    pending_ = 0;
     refresh();
 }
 
@@ -32,20 +31,13 @@ void FileScreen::refresh() {
     if (sel_ >= count_) sel_ = count_ ? count_ - 1 : 0;
 }
 
-bool FileScreen::confirm(uint8_t action, const char* question) {
-    if (pending_ == action + 1) {
-        pending_ = 0;
-        return true;
-    }
-    pending_ = uint8_t(action + 1);
-    ui().message(question, 3000);
-    return false;
+bool FileScreen::confirm(uint8_t action, const char* question, const char* ok) {
+    return ui().confirm(this, action, question, ok);
 }
 
 void FileScreen::encoder(int d) {
     if (!count_) return;
     sel_ = ((sel_ + d) % count_ + count_) % count_;
-    pending_ = 0;
 }
 
 bool FileScreen::button(uint8_t id, bool down) {
@@ -61,7 +53,6 @@ bool FileScreen::button(uint8_t id, bool down) {
         case b::F5:
             goat_ = !goat_;
             sel_ = 0;
-            pending_ = 0;
             reportShown_ = false;
             refresh();
             return true;
@@ -73,24 +64,27 @@ bool FileScreen::button(uint8_t id, bool down) {
 bool FileScreen::projectButton(uint8_t id) {
     App& app = ui().app();
     switch (id) {
+        case b::F7:
+            ui().show(ScreenId::kSidPlayer);
+            return true;
         case b::F6: {
-            if (pending_ != b::F6 + 1) {
-                // First press: what plays on a C64 (M9).
+            char file[kNameCap + 8];
+            std::snprintf(file, sizeof file, "%s.sid", app.fileName());
+            if (!ui().dialogOpen()) {
+                // First: what plays on a C64 (M9), shown while the dialog asks.
                 const psid::ExportCheck c = app.checkSid();
                 reportShown_ = false;
                 exportCheck_ = c.report;
-                pending_ = b::F6 + 1;
-                ui().message(c.ok ? "Press EXPORT SID again to write" : "Cannot export", 3000);
                 if (!c.ok) {
-                    pending_ = 0;
+                    ui().message("Cannot export", 3000);
                     reportShown_ = true;
                     sidFailed_ = true;   // the check's report stays in exportCheck_
+                    return true;
                 }
-                return true;
             }
-            pending_ = 0;
-            char file[kNameCap + 8];
-            std::snprintf(file, sizeof file, "%s.sid", app.fileName());
+            char q[64];
+            std::snprintf(q, sizeof q, "Write %s to /SIDTracker/SID?", file);
+            if (!confirm(b::F6, q, "EXPORT")) return true;
             const bool ok = app.exportSidFile(file);
             reportShown_ = true;
             sidFailed_ = false;
@@ -100,7 +94,7 @@ bool FileScreen::projectButton(uint8_t id) {
         case b::F1:
         case b::EncPush:
             if (!count_) return true;
-            if (app.dirty() && !confirm(b::F1, "Unsaved changes: press LOAD again")) return true;
+            if (app.dirty() && !confirm(b::F1, "Unsaved changes will be lost. Load?", "LOAD")) return true;
             if (app.load(names_[sel_])) ui().message("Loaded");
             return true;
         case b::F2: {
@@ -111,12 +105,28 @@ bool FileScreen::projectButton(uint8_t id) {
             return true;
         }
         case b::F3: {
+            // SAVE NEW: type a name on the pads (a free SONGnnn suggested);
+            // an existing name asks before it is overwritten.
             char name[kNameLen + 1];
-            for (int i = 1; i < 1000; ++i) {
-                std::snprintf(name, sizeof name, "SONG%03d", i);
-                bool used = false;
-                for (int k = 0; k < count_ && !used; ++k) used = !std::strcmp(names_[k], name);
-                if (!used) break;
+            if (const char* t = ui().keyboardResult(b::F3)) {
+                std::snprintf(saveName_, sizeof saveName_, "%s", t);
+            } else if (!ui().confirming(b::F3)) {
+                for (int i = 1; i < 1000; ++i) {
+                    std::snprintf(name, sizeof name, "SONG%03d", i);
+                    bool used = false;
+                    for (int k = 0; k < count_ && !used; ++k) used = !std::strcmp(names_[k], name);
+                    if (!used) break;
+                }
+                ui().keyboard(this, b::F3, "SAVE AS (project name)", name, true);
+                return true;
+            }
+            std::snprintf(name, sizeof name, "%s", saveName_);
+            bool exists = false;
+            for (int k = 0; k < count_ && !exists; ++k) exists = !std::strcmp(names_[k], name);
+            if (exists) {
+                char q[64];
+                std::snprintf(q, sizeof q, "%s exists. Overwrite it?", name);
+                if (!confirm(b::F3, q, "OVERWRITE")) return true;
             }
             if (app.save(name)) {
                 char msg[48];
@@ -127,12 +137,17 @@ bool FileScreen::projectButton(uint8_t id) {
             return true;
         }
         case b::F4:
-            if (app.dirty() && !confirm(b::F4, "Unsaved changes: press NEW again")) return true;
+            if (app.dirty() && !confirm(b::F4, "Unsaved changes will be lost. New song?", "NEW")) return true;
             app.newSong();
             ui().message("New song");
             return true;
         case b::F8:
-            if (!count_ || !confirm(b::F8, "Press DELETE again to delete")) return true;
+            if (!count_) return true;
+            {
+                char q[64];
+                std::snprintf(q, sizeof q, "Delete project %s?", names_[sel_]);
+                if (!confirm(b::F8, q, "DELETE")) return true;
+            }
             if (app.removeProject(names_[sel_])) ui().message("Deleted");
             refresh();
             return true;
@@ -148,24 +163,25 @@ bool FileScreen::goatButton(uint8_t id) {
         case b::EncPush: {
             if (!count_) return true;
             const bool isSong = std::strstr(names_[sel_], ".sng") || std::strstr(names_[sel_], ".SNG");
-            if (isSong && app.dirty() && !confirm(b::F1, "Unsaved changes: press IMPORT again")) return true;
+            if (isSong && app.dirty() && !confirm(b::F1, "Unsaved changes will be lost. Import?", "IMPORT")) return true;
             const bool ok = app.importGoat(names_[sel_]);
             reportShown_ = true;
             ui().message(ok ? (isSong ? "Song imported" : "Instrument imported") : "Import failed", 2000);
             return true;
         }
         case b::F2: {
-            if (pending_ != b::F2 + 1) {
-                // First press: the compatibility check (PLAN.md §16).
+            std::snprintf(file, sizeof file, "%s.sng", app.fileName());
+            if (!ui().dialogOpen()) {
+                // First: the compatibility check (PLAN.md §16), shown while the dialog asks.
                 const goat::ExportCheck c = app.checkGoat();
                 reportShown_ = false;
                 exportCheck_ = c.report;
-                pending_ = b::F2 + 1;
-                ui().message("Press EXPORT again to write", 3000);
-                return true;
             }
-            pending_ = 0;
-            std::snprintf(file, sizeof file, "%s.sng", app.fileName());
+            {
+                char q[64];
+                std::snprintf(q, sizeof q, "Write %s?", file);
+                if (!confirm(b::F2, q, "EXPORT")) return true;
+            }
             const bool ok = app.exportGoatSong(file);
             reportShown_ = true;
             ui().message(ok ? "Exported" : "Export failed", 2000);
@@ -184,7 +200,12 @@ bool FileScreen::goatButton(uint8_t id) {
             return true;
         }
         case b::F8: {
-            if (!count_ || !confirm(b::F8, "Press DELETE again to delete")) return true;
+            if (!count_) return true;
+            {
+                char q[72];
+                std::snprintf(q, sizeof q, "Delete %s?", names_[sel_]);
+                if (!confirm(b::F8, q, "DELETE")) return true;
+            }
             char path[96];
             std::snprintf(path, sizeof path, "%s/%s", App::kGoatDir, names_[sel_]);
             if (app.platform().storage->remove(path)) ui().message("Deleted");
@@ -198,7 +219,7 @@ bool FileScreen::goatButton(uint8_t id) {
 void FileScreen::labels(const char* out[8]) {
     if (goat_) {
         out[0] = "IMPORT";
-        out[1] = pending_ == b::F2 + 1 ? "WRITE .SNG" : "EXPORT SNG";
+        out[1] = "EXPORT SNG";
         out[2] = "EXPORT INS";
         out[4] = "PROJECTS";
     } else {
@@ -207,7 +228,8 @@ void FileScreen::labels(const char* out[8]) {
         out[2] = "SAVE NEW";
         out[3] = "NEW";
         out[4] = "GT FILES";
-        out[5] = pending_ == b::F6 + 1 ? "WRITE .SID" : "EXPORT SID";
+        out[5] = "EXPORT SID";
+        out[6] = "SID PLAYER";
     }
     out[7] = "DELETE";
 }
@@ -238,13 +260,13 @@ void FileScreen::draw(ot::Gfx& g) {
     // Right panel: export check or the last import / export report.
     const goat::Report* r = nullptr;
     const char* title = nullptr;
-    if (goat_ && pending_ == b::F2 + 1) {
+    if (goat_ && ui().dialogOpen() && !reportShown_) {
         r = &exportCheck_;
         title = "GOATTRACKER EXPORT";
     } else if (goat_ && reportShown_) {
         r = &app.goatReport();
         title = "REPORT";
-    } else if (!goat_ && pending_ == b::F6 + 1) {
+    } else if (!goat_ && ui().dialogOpen() && !reportShown_) {
         r = &exportCheck_;
         title = "SID EXPORT (C64)";
     } else if (!goat_ && reportShown_) {
@@ -257,8 +279,9 @@ void FileScreen::draw(ot::Gfx& g) {
         for (int i = 0; i < r->lines; ++i)
             g.text(432, kContentY + 76 + i * 18, kMono, r->line[i][0] == '!' ? col::kWarn : col::kText, r->line[i]);
     } else if (!goat_) {
-        g.text(440, kContentY + 56, kMono, col::kDim, "F5: GoatTracker .sng / .ins");
-        g.text(440, kContentY + 74, kMono, col::kDim, "F6: export .sid to /SIDTracker/SID");
+        g.text(440, kContentY + 56, kMono, col::kDim, "GT FILES: GoatTracker .sng / .ins");
+        g.text(440, kContentY + 74, kMono, col::kDim, "EXPORT SID: to /SIDTracker/SID");
+        g.text(440, kContentY + 92, kMono, col::kDim, "SID PLAYER: play .sid files");
     }
 }
 

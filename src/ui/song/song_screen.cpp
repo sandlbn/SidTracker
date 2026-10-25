@@ -65,8 +65,17 @@ bool SongScreen::button(uint8_t id, bool down) {
         case b::F1: s.restartPos = uint8_t(pos); u.app().markDirty(); return true;
         case b::F2: s.bpm = uint8_t(clampi(s.bpm - (u.shift ? 10 : 1), 32, 255)); u.app().markDirty(); return true;
         case b::F3: s.bpm = uint8_t(clampi(s.bpm + (u.shift ? 10 : 1), 32, 255)); u.app().markDirty(); return true;
-        case b::F4: s.speed = uint8_t(clampi(s.speed - 1, 1, 31)); u.app().markDirty(); return true;
-        case b::F5: s.speed = uint8_t(clampi(s.speed + 1, 1, 31)); u.app().markDirty(); return true;
+        case b::F4: s.speed = uint8_t(clampi(s.speed - 1, 1, 127)); u.app().markDirty(); return true;
+        case b::F5: s.speed = uint8_t(clampi(s.speed + 1, 1, 127)); u.app().markDirty(); return true;
+        case b::F8: {
+            // Multispeed x1..x8 (Shift: down), as GoatTracker's -S: only the
+            // call rate changes; speed and tempo commands count calls, so a
+            // GoatTracker 2x song plays right at x2 as it is.
+            const int old = s.multiSpeed();
+            s.multi = uint8_t(u.shift ? (old > 1 ? old - 1 : Song::kMaxMulti) : (old < Song::kMaxMulti ? old + 1 : 1));
+            u.app().markDirty();
+            return true;
+        }
         case b::F6:
             s.mode = s.mode == SongMode::kAuthentic ? SongMode::kExtended : SongMode::kAuthentic;
             u.app().markDirty();
@@ -83,6 +92,9 @@ void SongScreen::labels(const char* out[8]) {
     out[4] = "SPD +";
     out[5] = ui().song().mode == SongMode::kAuthentic ? "AUTHENTIC" : "EXTENDED";
     out[6] = "EDIT PAT";
+    static char multi[12];
+    std::snprintf(multi, sizeof multi, "MULTI x%u", unsigned(ui().song().multiSpeed()));
+    out[7] = multi;
 }
 
 void SongScreen::draw(ot::Gfx& g) {
@@ -92,9 +104,9 @@ void SongScreen::draw(ot::Gfx& g) {
     char buf[96];
     std::snprintf(buf, sizeof buf, "%s  by %s", s.name, s.author[0] ? s.author : "-");
     g.text(16, kContentY + 2, kLarge, col::kText, buf);
-    std::snprintf(buf, sizeof buf, "LENGTH %02X  RESTART %02X  BPM %u  SPEED %u  (%u Hz ticks)  %s", unsigned(s.orderLen),
-                  unsigned(s.restartPos), unsigned(s.bpm), unsigned(s.speed), unsigned(s.bpm * 2 / 5),
-                  s.mode == SongMode::kAuthentic ? "AUTHENTIC" : "EXTENDED");
+    std::snprintf(buf, sizeof buf, "LENGTH %02X  RESTART %02X  BPM %u  SPEED %u  x%u  (%u Hz ticks)  %s", unsigned(s.orderLen),
+                  unsigned(s.restartPos), unsigned(s.bpm), unsigned(s.speed), unsigned(s.multiSpeed()),
+                  unsigned(s.bpm * 2 * s.multiSpeed() / 5), s.mode == SongMode::kAuthentic ? "AUTHENTIC" : "EXTENDED");
     g.text(16, kContentY + 34, kMono, col::kDim, buf);
     const uint32_t ext = s.extendedFeatures();
     if (ext & kExtTempo) g.text(16, kContentY + 52, kMono, col::kWarn, "! tempo is not 50/60 Hz: GoatTracker export will change it");
@@ -122,7 +134,7 @@ void SongScreen::draw(ot::Gfx& g) {
         if (pos == u.orderPos) g.hline(colX[col_], y + 15, col_ == 1 ? 32 : 16, col::kCursor);
     }
     g.text(440, y0, kMono, col::kDim, "restart position in yellow");
-    g.text(440, y0 + 18, kMono, col::kDim, "F7 EDIT PAT: open the pattern");
+    g.text(440, y0 + 18, kMono, col::kDim, "EDIT PAT: open the pattern");
     g.text(440, y0 + 36, kMono, col::kDim, "Insert: duplicate  Delete: remove");
     g.text(440, y0 + 54, kMono, col::kDim, "Play: from the cursor");
 }

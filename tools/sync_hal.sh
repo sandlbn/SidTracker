@@ -16,7 +16,7 @@ git -C "$repo" archive "$commit" reimpl | tar -x -C "$tmp" || { echo "cannot rea
 src="$tmp/reimpl"
 
 # Files with documented local changes (PROVENANCE.md "Local changes").
-local_changes="src/platform/audio/audio_sgtl5000.cpp src/platform/audio/audio_sgtl5000.h src/platform/input/input.cpp src/platform/input/input.h src/platform/board.cpp src/platform/hal.h"
+local_changes="src/platform/display/ft81x.h src/platform/audio/audio_sgtl5000.cpp src/platform/audio/audio_sgtl5000.h src/platform/input/input.cpp src/platform/input/input.h src/platform/board.cpp src/platform/hal.h"
 
 map() {   # sidtracker-path opentracker-path
     printf '%s %s\n' "$1" "$2"

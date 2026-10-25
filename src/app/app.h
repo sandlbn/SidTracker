@@ -7,7 +7,9 @@
 #include <cstdint>
 
 #include "app/engine.h"
+#include "app/undo.h"
 #include "compatibility/goat/export.h"
+#include "c64/sid_player.h"
 #include "compatibility/sid/sid_export.h"
 #include "hal_api.h"
 #include "tracker/song/song.h"
@@ -18,6 +20,7 @@ namespace sidt {
 struct DriverStats {
     uint32_t minC = 0, avgC = 0, maxC = 0, blocks = 0;   // callback cycles (DWT) this window
     uint32_t underruns = 0;                              // cumulative late blocks
+    uint32_t displayFaults = 0;                          // FT81x coprocessor resets (lost frames)
 };
 
 struct Platform {
@@ -41,6 +44,19 @@ struct Platform {
     uint32_t fxFrames = 0;
     int16_t* kitMemory = nullptr;
     uint32_t kitSamples = 0;
+    // SID player: C64 RAM (64 KB) + KERNAL stub (8 KB); SDRAM on the
+    // device. Null = no SID player.
+    uint8_t* c64Memory = nullptr;
+    // Undo history (Undo::kBytes, about 2.2 MB; SDRAM on the device). Null
+    // = no undo.
+    uint8_t* undoMemory = nullptr;
+    uint32_t undoBytes = 0;
+    // Instrument library listing (App::kInstListBytes; SDRAM on the device).
+    // Null = no card instruments in SOUNDS.
+    uint8_t* listMemory = nullptr;
+    uint32_t listBytes = 0;
+    // MIDI DIN + USB-MIDI ports. Null = no MIDI.
+    ot::IMidiPort* midi = nullptr;
     const char* name = "host";         // shown on the benchmark page
     // Optional device hooks (null in the simulator).
     uint32_t (*cycleCounter)() = nullptr;                                   // DWT CYCCNT
@@ -70,11 +86,19 @@ public:
     void newSong();
     void autosave();
     const char* fileName() const { return fileName_; }
-    void markDirty() { dirty_ = autoDirty_ = true; }
+    void markDirty() { dirty_ = autoDirty_ = undoTouched_ = true; }
     bool dirty() const { return dirty_; }
     // Lists project names (sorted); returns the count (<= cap).
     int listProjects(char (*names)[kNameLen + 1], int cap);
     bool removeProject(const char* name);
+
+    // Undo / redo of song edits (Shift+Rec / Shift+Sample Rec). An edit
+    // burst becomes one step once the song has been still for
+    // Undo::kQuietMs. False: nothing to undo / redo.
+    bool undo();
+    bool redo();
+    int undoSteps() const { return undo_.undoSteps(); }
+    int redoSteps() const { return undo_.redoSteps(); }
 
     // GoatTracker files in kGoatDir (PLAN.md §16). `file` includes the
     // extension (.sng / .ins). The report of the last import / export /
@@ -87,6 +111,18 @@ public:
     bool exportGoatSong(const char* file);
     bool exportGoatInstrument(int slot, const char* file);
     int listGoat(char (*names)[kNameLen + 5], int cap);
+
+    // Instrument library on the card (UX plan P3.2): GoatTracker .ins files
+    // in kInstDir and its folders (one level), listed in SOUNDS as CARD.
+    static constexpr const char* kInstDir = "SIDTracker/Instruments";
+    static constexpr int kInstRecord = 64;      // "Folder/NAME.ins"
+    static constexpr int kInstMax = 512;
+    static constexpr uint32_t kInstListBytes = uint32_t(kInstRecord) * kInstMax;
+    int scanInstruments();                      // re-reads the card; returns the count
+    int instrumentCount() const { return instCount_; }
+    const char* instrumentFile(int i) const;    // relative to kInstDir; "" when out of range
+    bool loadInstrumentFile(int i, int slot);   // into `slot` (tables appended)
+    bool saveInstrumentFile(int slot, const char* name);   // kInstDir/User/<name>.ins
 
     // .sid export (M9) into kSidDir, `file` with the extension; the report
     // goes to goatReport(). Uses the scratch memory.
@@ -106,12 +142,43 @@ public:
     struct Settings {
         uint8_t volume = 80;   // percent
         uint8_t theme = 0;     // ui/palette.h
+        // MIDI (Config). Ports: 0 off, 1 DIN, 2 USB, 3 both.
+        uint8_t midiChannel = 0;   // notes / CC in: 0 = any channel, 1..16
+        uint8_t clockOut = 0;      // MIDI clock + Start / Stop out
+        uint8_t syncIn = 0;        // follow MIDI clock in: 0 off, 1 DIN, 2 USB
+        uint8_t asidOut = 0;       // SID register frames out (ASID)
+        uint8_t sidCopy = 0;       // 1: a one-SID song / tune also plays on SID 2 (both sides)
     };
     const Settings& settings() const { return settings_; }
     void setVolume(uint8_t percent);
     void setTheme(uint8_t index);
+    void setMidi(uint8_t channel, uint8_t clockOut, uint8_t syncIn, uint8_t asidOut);
+    void setSidCopy(bool on);
+    // True when SID 2 is copying SID 1 right now (setting on and SID 2 unused).
+    bool sidCopyActive() const { return engine.sidCopy(); }
+    // MIDI clock in: true while an external clock drives the tempo.
+    bool midiSynced() const { return sync_.locked; }
+    uint32_t midiSyncBpmX10() const { return sync_.bpmX10; }
     bool loadSettings();
     bool saveSettings();
+
+    // SID player (.sid files anywhere on the card; ui SID PLAYER screen).
+    // `path` is relative to the card root; song 0 = the file's start song.
+    // The tune runs in the main loop (sidService, from loop()) a few frames
+    // ahead of the audio. sidError() says why play failed or stopped.
+    static constexpr uint32_t kC64MemoryBytes = c64::SidPlayer::kRamBytes + c64::SidPlayer::kRomBytes;
+    bool sidPlay(const char* path, int song = 0);
+    void sidStop();
+    bool sidPlaying() const { return sidPlaying_; }
+    const c64::SidInfo& sidInfo() const { return sidInfo_; }
+    int sidSong() const { return sidPlayer_.song(); }
+    uint32_t sidSeconds() const;
+    const char* sidError() const { return sidError_; }
+    const char* sidPath() const { return sidPath_; }
+    // Keeps a playing tune fed during long main-loop work (folder listings).
+    void sidPump() {
+        if (sidPlaying_) sidService();
+    }
 
     // The frame on the display as a 24-bit BMP in kShotDir (SHOT0001.bmp,
     // ...; Shift + Power). `name` gets "Saved SHOTnnnn.bmp". Uses the scratch
@@ -139,6 +206,31 @@ private:
     bool dirty_ = false;       // changed since the last save under fileName_
     bool autoDirty_ = false;   // changed since the last autosave
     uint32_t lastAutosave_ = 0;
+    uint32_t lastCopyCheck_ = 0;
+    void updateSidCopy();
+    Undo undo_;
+    int instCount_ = 0;
+    bool undoTouched_ = false;   // markDirty since the last loop pass
+    bool undoSwap(bool redo);
+    void sidService();
+    void midiPoll();
+    void midiMessage(uint8_t port, const midi::Parser::Msg& m);
+    void midiSyncUpdate();
+    midi::Parser midiIn_[2];
+    struct Sync {
+        uint32_t lastUs = 0, periodUs = 0, lastSeenMs = 0;
+        uint32_t clocks = 0, startTicks = 0;
+        double target = 0;                  // ticks the clocks since Start ask for
+        uint8_t stopPos = 0, stopRow = 0;   // where Stop halted (for Continue)
+        uint32_t bpmX10 = 0;
+        bool running = false, locked = false;
+    } sync_;
+    c64::SidPlayer sidPlayer_;
+    c64::SidInfo sidInfo_;
+    bool sidPlaying_ = false;
+    const char* sidError_ = "";
+    char sidPath_[160] = {};
+    uint32_t sidFramesPlayed_ = 0;
     Settings settings_;
     bool settingsDirty_ = false;
     uint32_t settingsChanged_ = 0;

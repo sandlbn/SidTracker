@@ -194,3 +194,77 @@ TEST(extended_settings_and_drums_round_trip) {
     const uint32_t ext = b.s.extendedFeatures();
     CHECK((ext & kExtEffects) && (ext & kExtDrums) && (ext & kExtModulation));
 }
+
+TEST(multispeed_round_trips_and_old_files_load_at_x1) {
+    SongBox a, b, c;
+    a.s.multi = 3;
+    MemW w;
+    CHECK(project::save(a.s, w) == project::Result::kOk);
+    MemR r(w.b);
+    CHECK(project::load(b.s, r) == project::Result::kOk);
+    CHECK_EQ(b.s.multi, 3);
+    // A 0.7 file: META without the multispeed byte.
+    std::vector<uint8_t> old = w.b;
+    size_t at = 8;
+    CHECK(std::memcmp(old.data() + at, "META", 4) == 0);
+    const uint32_t len = old[at + 4] | old[at + 5] << 8;
+    old.erase(old.begin() + long(at + 8 + len - 1));
+    old[at + 4] = uint8_t(len - 1);
+    MemR r2(old);
+    CHECK(project::load(c.s, r2) == project::Result::kOk);
+    CHECK_EQ(c.s.multi, 1);
+}
+
+namespace {
+// Drops one chunk (tag) from a saved project: files from before it existed.
+std::vector<uint8_t> withoutChunk(const std::vector<uint8_t>& in, const char* tag) {
+    std::vector<uint8_t> out(in.begin(), in.begin() + 8);
+    size_t at = 8;
+    while (at + 8 <= in.size()) {
+        const uint32_t len = in[at + 4] | in[at + 5] << 8 | in[at + 6] << 16 | uint32_t(in[at + 7]) << 24;
+        if (std::memcmp(&in[at], tag, 4) != 0) out.insert(out.end(), in.begin() + long(at), in.begin() + long(at + 8 + len));
+        at += 8 + len;
+    }
+    return out;
+}
+}  // namespace
+
+TEST(old_files_keep_their_silent_slots_where_patterns_use_them) {
+    // UX plan P0.1: before 0.8 a slot without an INST record was silent.
+    SongBox a, b, c;
+    a.s.pattern(0).cells[0][0] = {37, 5, 0, 0};   // slot 5 played, still the default
+    MemW w;
+    CHECK(project::save(a.s, w) == project::Result::kOk);
+    MemR r(w.b);
+    CHECK(project::load(b.s, r) == project::Result::kOk);
+    CHECK(b.s.inst[5].empty());                    // a 0.8 file: init patch
+    // A 0.8.1 file: no IDEF, and no INST record for slots at their default.
+    const std::vector<uint8_t> old = withoutChunk(withoutChunk(w.b, "IDEF"), "INST");
+    CHECK(old.size() < w.b.size());
+    MemR r2(old);
+    CHECK(project::load(c.s, r2) == project::Result::kOk);
+    CHECK_EQ(c.s.inst[5].sr, Instrument::kLegacySr);    // played: silent as before
+    CHECK_EQ(c.s.inst[5].firstWave, Instrument::kLegacyWave);
+    CHECK(c.s.inst[6].empty());                    // unused: init patch
+    // Saved again, the silent slot is written out and stays silent.
+    MemW w3;
+    CHECK(project::save(c.s, w3) == project::Result::kOk);
+    SongBox d;
+    MemR r3(w3.b);
+    CHECK(project::load(d.s, r3) == project::Result::kOk);
+    CHECK_EQ(d.s.inst[5].firstWave, Instrument::kLegacyWave);
+}
+
+TEST(played_init_slots_are_written_for_older_firmware) {
+    // Fable review 2026-10-22: a file whose pattern plays an untouched slot
+    // must sound the same on 0.8.1 (no IDEF rule there): the slot is written.
+    SongBox a;
+    a.s.pattern(0).cells[0][0] = {37, 7, 0, 0};
+    MemW w;
+    CHECK(project::save(a.s, w) == project::Result::kOk);
+    SongBox b;
+    const std::vector<uint8_t> asOld = withoutChunk(w.b, "IDEF");   // as 0.8.1 reads it
+    MemR r(asOld);
+    CHECK(project::load(b.s, r) == project::Result::kOk);
+    CHECK(b.s.inst[7].empty());           // the init patch, from its INST record
+}

@@ -67,6 +67,11 @@ TEST(samples_per_tick_follow_bpm) {
     CHECK_EQ(f.player.samplesPerTick16(44100000) >> 16, 882u);   // 125 BPM = 50 Hz
     f.song.bpm = 150;
     CHECK_EQ(f.player.samplesPerTick16(44100000) >> 16, 735u);
+    f.song.bpm = 125;
+    f.song.multi = 4;   // multispeed: four ticks per 50 Hz frame
+    CHECK_EQ(f.player.samplesPerTick16(44100000) >> 16, 220u);
+    f.song.multi = 0;   // out of range: x1
+    CHECK_EQ(f.player.samplesPerTick16(44100000) >> 16, 882u);
 }
 
 TEST(goattracker_note_table) {
@@ -473,4 +478,32 @@ TEST(rows_without_early_fetch_play_in_order) {
             CHECK_EQ(f.player.channelNote(0), 48 + r);
         }
     }
+}
+
+TEST(lfo_period_counts_frames_at_multispeed) {
+    // Square LFO of 4 frames: at x2 it flips every 4 ticks, not every 2.
+    Fixture f;
+    f.sawInstrument();
+    f.song.inst[2].pulsePtr = 0;
+    f.song.multi = 2;
+    f.song.mod.lfo[0] = Lfo{1, Lfo::kSquare, 4, 50};
+    f.cell(0, 0, 0) = {C4, 2, 0, 0};
+    f.player.playSong(0);
+    f.ticks(2);
+    const uint16_t a = f.pw();
+    f.ticks(2);
+    CHECK_EQ(f.pw(), a);   // x1 would have flipped here
+    f.ticks(4);
+    CHECK(f.pw() != a);
+}
+
+TEST(a_fresh_instrument_sounds) {
+    // UX plan P0.1: every slot starts as an audible init patch (saw + gate).
+    Fixture f;
+    f.cell(0, 0, 0) = {C4, 7, 0, 0};
+    f.player.playSong(0);
+    f.ticks(2);
+    CHECK(f.ctl() & 0x01);              // gate on
+    CHECK(f.ctl() & 0xF0);              // with a waveform
+    CHECK_EQ(f.rec.regs[0][6] & 0xF0, 0xA0);   // sustain A
 }

@@ -23,7 +23,7 @@ const Info kInfo[kCount] = {
     {"FILTER PTR", "filter tbl row"},
     {"FILTER CTRL", "res<<4 | routing"},
     {"CUTOFF", "cutoff high byte"},
-    {"VOLUME", "0..F"},
+    {"SID VOLUME", "0..F, whole chip (3 tracks); per track: Master"},
     {"FUNK TEMPO", "speed tbl row"},
     {"TEMPO", "ticks per row"},
 };

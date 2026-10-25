@@ -59,6 +59,9 @@ Each is marked `SIDTracker local change (PROVENANCE.md)` in the source.
    until the power button is pressed, then writes 1 and resets. Drop this
    entry when the recorded commit moves past `141ee45`.
 
+5. `display/ft81x.h`: a public `faults()` accessor for the coprocessor
+   reset counter, shown on the Benchmark page (UX plan P0.4).
+
 ## Kept although unused
 
 - `radio_si4703.*`: `board.cpp` parks the tuner in reset and calls

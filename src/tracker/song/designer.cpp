@@ -208,6 +208,8 @@ Design decode(const Song& s, int slot) {
         else if (t.r == 0x07) d.transient = kFifth;
     } else if (in.wavePtr && (w.l(in.wavePtr) & 0xF0) && w.l(in.wavePtr) < 0xE0) {
         d.wave = uint8_t(w.l(in.wavePtr) & 0xF0);
+    } else if (!in.wavePtr && (in.firstWave & 0xF0) && in.firstWave < 0xE0) {
+        d.wave = uint8_t(in.firstWave & 0xF0);   // no wave program: the first wave plays (init patch: saw)
     }
     const Table& p = s.tables[kPulseTable];
     if (isPulse(p, in.pulsePtr)) {
@@ -247,12 +249,14 @@ Design decode(const Song& s, int slot) {
     return d;
 }
 
-Result apply(Song& s, int slot, const Design& d, int voice) {
+Result apply(Song& s, int slot, const Design& d, int voice, uint8_t sections) {
     if (slot < 1 || slot >= kInstrumentCount) return Result::kTableFull;
     Instrument& in = s.inst[slot];
-    const int sw = block(s, kWaveTable, slot, isWave(s.tables[kWaveTable], in.wavePtr), kWaveRows);
-    const int sp = block(s, kPulseTable, slot, isPulse(s.tables[kPulseTable], in.pulsePtr), kPulseRows);
-    const bool filt = d.filter != kFilterOff;
+    const bool doWave = sections & kWaveProg, doPulse = sections & kPulseProg, doFilter = sections & kFilterProg;
+    const bool doVib = sections & kVib;
+    const int sw = doWave ? block(s, kWaveTable, slot, isWave(s.tables[kWaveTable], in.wavePtr), kWaveRows) : -1;
+    const int sp = doPulse ? block(s, kPulseTable, slot, isPulse(s.tables[kPulseTable], in.pulsePtr), kPulseRows) : -1;
+    const bool filt = doFilter && d.filter != kFilterOff;
     int sf = -1;
     if (filt) {
         const bool shaped = in.filterPtr && isFilter(s.tables[kFilterTable], in.filterPtr);
@@ -261,7 +265,7 @@ Result apply(Song& s, int slot, const Design& d, int voice) {
     }
     // Vibrato: an existing identical speed row, else a new one.
     int sv = -1;
-    const bool vib = d.vibDepth != 0;
+    const bool vib = doVib && d.vibDepth != 0;
     if (vib) {
         const Table& t = s.tables[kSpeedTable];
         sv = 0;
@@ -273,10 +277,17 @@ Result apply(Song& s, int slot, const Design& d, int voice) {
     }
     if (!sw || !sp || !sf || !sv) return Result::kTableFull;
     Row w[kWaveRows], p[kPulseRows], f[kFilterRows];
-    waveRows(d, w);
-    put(s.tables[kWaveTable], w, kWaveRows, sw);
-    pulseRows(d, p, sp);
-    put(s.tables[kPulseTable], p, kPulseRows, sp);
+    if (doWave) {
+        waveRows(d, w);
+        put(s.tables[kWaveTable], w, kWaveRows, sw);
+        in.firstWave = 0x09;
+        in.wavePtr = uint8_t(sw);
+    }
+    if (doPulse) {
+        pulseRows(d, p, sp);
+        put(s.tables[kPulseTable], p, kPulseRows, sp);
+        in.pulsePtr = uint8_t(sp);
+    }
     if (filt) {
         filterRows(d, f, sf, voice);
         put(s.tables[kFilterTable], f, kFilterRows, sf);
@@ -285,16 +296,22 @@ Result apply(Song& s, int slot, const Design& d, int voice) {
         s.tables[kSpeedTable].left[sv - 1] = d.vibSpeed;
         s.tables[kSpeedTable].right[sv - 1] = d.vibDepth;
     }
-    in.ad = uint8_t((d.attack << 4) | (d.decay & 15));
-    in.sr = uint8_t((d.sustain << 4) | (d.release & 15));
-    in.firstWave = 0x09;
-    in.wavePtr = uint8_t(sw);
-    in.pulsePtr = uint8_t(sp);
-    in.filterPtr = uint8_t(filt ? sf : 0);
-    in.vibParam = uint8_t(vib ? sv : 0);
-    in.vibDelay = vib ? (d.vibDelay ? d.vibDelay : 1) : 0;
-    in.gateTimer = uint8_t((in.gateTimer & 0x7F) | (d.hardRestart ? 0 : 0x80));
-    if (!(in.gateTimer & 0x3F)) in.gateTimer = uint8_t(in.gateTimer | 2);
+    if (sections & kEnv) {
+        in.ad = uint8_t((d.attack << 4) | (d.decay & 15));
+        in.sr = uint8_t((d.sustain << 4) | (d.release & 15));
+    }
+    // A filter program the designer did not make reads as OFF; only switching
+    // a designer filter off clears the pointer, a hand-made one stays.
+    if (doFilter && (filt || !in.filterPtr || isFilter(s.tables[kFilterTable], in.filterPtr)))
+        in.filterPtr = uint8_t(filt ? sf : 0);
+    if (doVib) {
+        in.vibParam = uint8_t(vib ? sv : 0);
+        in.vibDelay = vib ? (d.vibDelay ? d.vibDelay : 1) : 0;
+    }
+    if (sections & kHr) {
+        in.gateTimer = uint8_t((in.gateTimer & 0x7F) | (d.hardRestart ? 0 : 0x80));
+        if (!(in.gateTimer & 0x3F)) in.gateTimer = uint8_t(in.gateTimer | 2);
+    }
     return Result::kOk;
 }
 
